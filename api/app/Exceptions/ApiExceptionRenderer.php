@@ -73,7 +73,18 @@ final class ApiExceptionRenderer
             ];
         }
 
-        return new JsonResponse($payload, $status);
+        /*
+         * Carry over headers the exception was throwing *with*, not just its
+         * status. The throttler is the case that matters: it raises a 429
+         * carrying Retry-After and the X-RateLimit-* trio, and rebuilding the
+         * response from scratch silently dropped all of them. The body then
+         * told clients to "retry after the period in the Retry-After header"
+         * that was never sent — and a client with no wait hint retries
+         * immediately, against the endpoint already refusing it.
+         */
+        $headers = $e instanceof HttpExceptionInterface ? $e->getHeaders() : [];
+
+        return new JsonResponse($payload, $status, $headers);
     }
 
     /** @return array{int, string, string, array<string, mixed>|null} */

@@ -37,6 +37,14 @@ x-api-environment: &api-environment
   QUEUE_CONNECTION: redis
   SESSION_DRIVER: redis
   REALTIME_ENABLED: "true"
+  # Only the per-IP ceiling is raised, and only here. The end-to-end suite
+  # signs in seven times from one browser inside a minute, which at the
+  # production ceiling looks exactly like credential stuffing. The per-identity
+  # limit is deliberately left at its default: those sign-ins use different
+  # accounts, so it is not the binding constraint, and leaving it alone keeps
+  # "six wrong passwords for one account gets refused" true inside Docker --
+  # which is what docs/running-incidentflow.pdf tells a reader to try.
+  AUTH_RATE_LIMIT_PER_IP: "200"
   REALTIME_CHANNEL_PREFIX: incidentflow
   MAIL_MAILER: smtp
   MAIL_HOST: mailpit

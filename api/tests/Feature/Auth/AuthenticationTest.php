@@ -262,4 +262,48 @@ final class AuthenticationTest extends TestCase
 
         $this->assertSame(0, RefreshToken::query()->usable()->count());
     }
+
+    public function test_repeated_failed_sign_ins_for_one_identity_are_throttled(): void
+    {
+        /*
+         * There was no test for this at all: the limiters were defined and
+         * attached to the routes, which is easy to confirm by reading, and
+         * nothing proved they actually refuse anything.
+         *
+         * The identity limit is deliberately keyed on email *and* IP together.
+         * Keyed on IP alone an attacker sprays one password across thousands of
+         * accounts from one address; keyed on email alone anyone can lock a
+         * named user out of their own account on demand.
+         */
+        $limit = (int) config('incidents.rate_limits.auth_per_identity');
+
+        $statuses = [];
+        for ($attempt = 0; $attempt <= $limit; $attempt++) {
+            $statuses[] = $this->postJson('/api/v1/auth/login', [
+                'email' => 'nobody@incidentflow.test',
+                'password' => 'not-the-password',
+            ])->getStatusCode();
+        }
+
+        $this->assertNotContains(429, array_slice($statuses, 0, $limit), 'Throttling must not begin before the configured limit.');
+        $this->assertSame(429, end($statuses), 'The attempt past the limit must be refused with 429.');
+    }
+
+    public function test_a_throttled_response_says_when_to_retry(): void
+    {
+        $limit = (int) config('incidents.rate_limits.auth_per_identity');
+
+        $response = null;
+        for ($attempt = 0; $attempt <= $limit; $attempt++) {
+            $response = $this->postJson('/api/v1/auth/login', [
+                'email' => 'someone-else@incidentflow.test',
+                'password' => 'not-the-password',
+            ]);
+        }
+
+        $response->assertStatus(429);
+        // Without Retry-After a client can only guess, and guessing means
+        // hammering an endpoint that is already refusing it.
+        $response->assertHeader('Retry-After');
+    }
 }

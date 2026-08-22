@@ -27,6 +27,23 @@ return [
         'retention_hours' => (int) env('IDEMPOTENCY_RETENTION_HOURS', 24),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Rate limits
+    |--------------------------------------------------------------------------
+    |
+    | Only the auth limits are configurable, and only because an environment
+    | where every client shares one source IP -- a browser driving an
+    | end-to-end suite, say -- legitimately needs a higher ceiling than a
+    | public deployment. The defaults are the production values; raise them in
+    | docker-compose, never in a deployed environment.
+    |
+    */
+    'rate_limits' => [
+        'auth_per_ip' => (int) env('AUTH_RATE_LIMIT_PER_IP', 10),
+        'auth_per_identity' => (int) env('AUTH_RATE_LIMIT_PER_IDENTITY', 5),
+    ],
+
     'retention' => [
         /**
          * Audit logs are kept effectively forever by default: the whole point

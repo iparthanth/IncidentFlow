@@ -18,8 +18,12 @@ const DEMO_PASSWORD = 'incidentflow';
 
 async function signIn(page: Page, email: string): Promise<void> {
   await page.goto('/login');
-  await page.getByLabel('Email').fill(email);
-  await page.getByLabel('Password').fill(DEMO_PASSWORD);
+  await page.getByLabel('Work email').fill(email);
+  // Exact, because the field shares the word "password" with the reveal
+  // toggle's aria-label ("Show password"). getByLabel substring-matches by
+  // default, so without this the locator resolves to two elements and trips
+  // strict mode -- which is exactly what happened when the toggle was added.
+  await page.getByLabel('Password', { exact: true }).fill(DEMO_PASSWORD);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('heading', { name: 'Incidents' })).toBeVisible();
 }

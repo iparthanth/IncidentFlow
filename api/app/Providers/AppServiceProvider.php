@@ -160,9 +160,17 @@ final class AppServiceProvider extends ServiceProvider
             ? Limit::perMinute(180)->by('user:'.$request->user()->getAuthIdentifier())
             : Limit::perMinute(40)->by('ip:'.$request->ip()));
 
+        // Configurable only so that an environment where every request shares
+        // one source IP can raise the ceiling. The end-to-end suite is exactly
+        // that: seven sign-ins from one browser in under a minute, which trips
+        // the per-IP limit and fails tests that have nothing to do with
+        // throttling. Production keeps these defaults.
+        $authPerIp = (int) config('incidents.rate_limits.auth_per_ip');
+        $authPerIdentity = (int) config('incidents.rate_limits.auth_per_identity');
+
         RateLimiter::for('auth', static fn (Request $request): array => [
-            Limit::perMinute(10)->by('auth-ip:'.$request->ip()),
-            Limit::perMinute(5)->by('auth-id:'.strtolower((string) $request->input('email')).'|'.$request->ip()),
+            Limit::perMinute($authPerIp)->by('auth-ip:'.$request->ip()),
+            Limit::perMinute($authPerIdentity)->by('auth-id:'.strtolower((string) $request->input('email')).'|'.$request->ip()),
         ]);
 
         // Writes are cheap to issue and expensive to serve: each one writes a
