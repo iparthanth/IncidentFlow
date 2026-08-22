@@ -1,0 +1,76 @@
+# ---------------------------------------------------------------------------
+# Secrets — the single most important section of this file
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# The RS256 pair. A committed private key can mint an administrator token for
+# any tenant, and git history keeps it long after the "oops" commit.
+*.pem
+*.key
+!**/*.example.pem
+api/storage/keys/
+infra/keys/
+
+# ---------------------------------------------------------------------------
+# Dependencies and build output
+# ---------------------------------------------------------------------------
+node_modules/
+vendor/
+dist/
+build/
+.vite/
+
+# ---------------------------------------------------------------------------
+# Laravel
+# ---------------------------------------------------------------------------
+api/storage/*.key
+api/storage/app/**
+!api/storage/app/.gitignore
+api/storage/framework/cache/**
+api/storage/framework/sessions/**
+api/storage/framework/views/**
+api/storage/logs/**
+api/bootstrap/cache/*.php
+api/public/hot
+api/public/storage
+api/.phpunit.result.cache
+api/.phpunit.cache/
+
+# Local SQLite database used by the no-Docker development path.
+*.sqlite
+*.sqlite-journal
+*.sqlite3
+
+# ---------------------------------------------------------------------------
+# Test artefacts
+# ---------------------------------------------------------------------------
+coverage/
+web/playwright-report/
+web/test-results/
+web/blob-report/
+.nyc_output/
+
+# ---------------------------------------------------------------------------
+# Editors and operating systems
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------------------------------------------------------------------
+# Local tooling
+# ---------------------------------------------------------------------------
+*.log
+npm-debug.log*
+.docker/
+
+# Playwright browser binaries, when relocated off the system drive
+playwright-browsers/

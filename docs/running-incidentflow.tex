@@ -1,0 +1,1084 @@
+\documentclass[11pt,a4paper]{article}
+
+% ---------------------------------------------------------------------------
+% Packages — deliberately conservative, so this compiles on a stock MiKTeX or
+% TeX Live installation without downloading anything unusual.
+% ---------------------------------------------------------------------------
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=2.4cm,headheight=14pt]{geometry}
+\usepackage{xcolor}
+\usepackage{amssymb}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{listings}
+\usepackage{graphicx}   % \rotatebox, for the permission-matrix headings
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{parskip}
+\usepackage{array}
+\usepackage[hidelinks]{hyperref}
+
+% ---------------------------------------------------------------------------
+% Colours
+% ---------------------------------------------------------------------------
+\definecolor{ink}{HTML}{1E293B}
+\definecolor{muted}{HTML}{64748B}
+\definecolor{rule}{HTML}{CBD5E1}
+\definecolor{shell}{HTML}{F1F5F9}
+\definecolor{accent}{HTML}{DC2626}
+\definecolor{good}{HTML}{047857}
+\definecolor{warn}{HTML}{B45309}
+\definecolor{warnbg}{HTML}{FEF3C7}
+\definecolor{infobg}{HTML}{EFF6FF}
+\definecolor{goodbg}{HTML}{ECFDF5}
+
+\color{ink}
+
+% ---------------------------------------------------------------------------
+% Headers
+% ---------------------------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\small\color{muted}IncidentFlow — Setup and Verification Manual}
+\fancyhead[R]{\small\color{muted}\thepage}
+
+\titleformat{\section}{\Large\bfseries\color{ink}}{\thesection.}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{ink}}{\thesubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{2.2ex plus 1ex minus .2ex}{1.2ex plus .2ex}
+
+% ---------------------------------------------------------------------------
+% Code listings
+% ---------------------------------------------------------------------------
+\lstdefinestyle{shellstyle}{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{shell},
+  frame=single,
+  rulecolor=\color{rule},
+  framesep=6pt,
+  xleftmargin=0pt,
+  breaklines=true,
+  breakatwhitespace=false,
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+}
+\lstset{style=shellstyle}
+
+% ---------------------------------------------------------------------------
+% Callout boxes — built from primitives so no extra package is required.
+% ---------------------------------------------------------------------------
+\newcommand{\callout}[3]{%
+  \par\medskip\noindent
+  \fcolorbox{#1}{#2}{%
+    \begin{minipage}{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}
+      \small #3
+    \end{minipage}%
+  }\par\medskip
+}
+\newcommand{\note}[1]{\callout{rule}{infobg}{#1}}
+\newcommand{\warnbox}[1]{\callout{warn}{warnbg}{\textbf{Careful.} #1}}
+\newcommand{\expect}[1]{\callout{good}{goodbg}{\textbf{You should see:} #1}}
+
+% A checkbox item, for the verification lists.
+\newcommand{\cbox}{\item[$\square$]}
+
+% Inline shell command
+\newcommand{\cmd}[1]{\texttt{\small #1}}
+
+% ---------------------------------------------------------------------------
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+
+{\Huge\bfseries IncidentFlow}\\[0.4cm]
+{\Large\color{muted} Setup and Verification Manual}\\[2cm]
+
+{\large A step-by-step guide to running the platform\\
+and checking every part of it yourself.}\\[1.5cm]
+
+\rule{9cm}{0.4pt}\\[0.6cm]
+{\color{muted}\small Written for someone who has never seen this project before.\\
+No prior knowledge of Laravel, React or Docker is assumed.}\\[0.6cm]
+\rule{9cm}{0.4pt}
+
+\vfill
+{\small\color{muted}Project directory: \texttt{D:\textbackslash IncidentFlow}}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ===========================================================================
+\section{Before you start}
+
+\subsection{What this document is}
+
+IncidentFlow is a platform for handling production incidents: staff report
+problems, engineers coordinate the response, and managers track how reliable
+the systems are over time.
+
+This manual takes you from a cold machine to a running application, then walks
+you through every screen and asks you to confirm what you see. Every section
+ends with a checklist. If every box ticks, the system works.
+
+\subsection{What is actually running}
+
+Five separate programs cooperate. It helps to know what each one is for before
+you start them.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.2cm}>{\raggedright\arraybackslash}p{4.2cm}>{\raggedright\arraybackslash}p{6.6cm}@{}}
+\toprule
+\textbf{Program} & \textbf{Address} & \textbf{Its job} \\
+\midrule
+PostgreSQL & port 5432 & Stores everything. The single source of truth. \\
+Redis & port 6379 & Carries live events and holds the job queue. \\
+API (Laravel) & port 8000 & All the rules. Decides who may do what. \\
+Realtime (Node) & port 3001 & Pushes live updates to open browsers. \\
+Web app (React) & port 5173 & What you look at. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{The web app on its own does nothing useful --- it asks the API for
+everything. If a screen is empty, the question is almost always ``is the API
+running?'' rather than ``is the page broken?''}
+
+\subsection{Two ways to run it}
+
+\begin{description}[leftmargin=1.6cm,style=nextline]
+\item[Path A --- Docker] One command starts everything. Recommended if you
+  have Docker Desktop installed. Skip to Section~\ref{sec:docker}.
+\item[Path B --- Manual] Start each program yourself. More steps, but you see
+  exactly what is happening and it needs no Docker. Section~\ref{sec:manual}.
+\end{description}
+
+To find out which you can use, open a terminal and type:
+
+\begin{lstlisting}
+docker --version
+\end{lstlisting}
+
+If that prints a version number, use Path A. If it says the command is not
+recognised, use Path B.
+
+\subsection{Opening a terminal}
+
+Everything below is typed into a terminal.
+
+\begin{itemize}[leftmargin=1.4cm]
+\item \textbf{Windows}: press the Start button, type \cmd{powershell}, press Enter.
+\item \textbf{macOS}: press \cmd{Cmd+Space}, type \cmd{terminal}, press Enter.
+\end{itemize}
+
+You will often need \emph{several} terminals open at once, because some
+programs keep running and never give you the prompt back. Open a new one the
+same way; that is normal and expected.
+
+\newpage
+% ===========================================================================
+\section{Path A --- running it with Docker}
+\label{sec:docker}
+
+\subsection{Start everything}
+
+\begin{lstlisting}
+cd D:\IncidentFlow
+docker compose up --build
+\end{lstlisting}
+
+The first run takes several minutes because it downloads and builds
+everything. Later runs take seconds.
+
+\expect{A long stream of coloured log lines that eventually settles down. Do
+\emph{not} close this window --- closing it stops the application.}
+
+\subsection{Confirm it came up}
+
+Open a \emph{second} terminal and run:
+
+\begin{lstlisting}
+docker compose ps
+\end{lstlisting}
+
+\expect{A table listing \texttt{postgres}, \texttt{redis}, \texttt{mailpit}, \texttt{api},
+\texttt{realtime}, \texttt{web}, \texttt{nginx}, \texttt{horizon} and
+\texttt{scheduler}. The important column is \texttt{STATUS} --- everything
+should say \texttt{running} or \texttt{healthy}.}
+
+The \texttt{migrate} service is expected to say \texttt{exited (0)}. That is
+correct: it creates the database tables and loads the demo data, then stops.
+It is meant to run once, not forever.
+
+\subsection{Open the application}
+
+Go to \url{http://localhost:8080} in your browser.
+
+Two other addresses are useful:
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\url{http://localhost:8025} & Mailpit --- every email the system sends lands here \\
+\url{http://localhost:8080/horizon} & Horizon --- the background job dashboard \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{No real email is ever sent in this setup. Mailpit catches everything, so
+you can read the notifications without anyone receiving them.}
+
+Now jump to Section~\ref{sec:health}.
+
+\newpage
+% ===========================================================================
+\section{Path B --- running it manually}
+\label{sec:manual}
+
+You will need four terminal windows. Keep them all open.
+
+\subsection{Step 1 --- one-time preparation}
+
+Do this once, ever. Skip it on later runs.
+
+\begin{lstlisting}
+cd D:\IncidentFlow\api
+copy .env.local.example .env
+composer install
+php artisan key:generate
+php artisan jwt:keys
+php artisan migrate --seed
+\end{lstlisting}
+
+Taking those in turn:
+
+\begin{description}[leftmargin=0.6cm,style=nextline,itemsep=2pt]
+\item[\cmd{copy .env.local.example .env}] Creates the settings file. The
+  \texttt{.env} file holds passwords and is deliberately never committed to
+  version control.
+\item[\cmd{composer install}] Downloads the PHP libraries the API needs.
+\item[\cmd{php artisan key:generate}] Creates the encryption key for this
+  installation.
+\item[\cmd{php artisan jwt:keys}] Creates the pair of security keys used to
+  sign login tokens. This prints a long line starting
+  \texttt{JWT\_PUBLIC\_KEY=} --- you can ignore it for now.
+\item[\cmd{php artisan migrate --seed}] Builds the database tables and fills
+  them with ninety days of realistic demo incidents.
+\end{description}
+
+\expect{The last command prints a table of demo accounts and the line
+\emph{``17 incidents across 90 days, 3 still open.''}}
+
+Then prepare the web app, once:
+
+\begin{lstlisting}
+cd D:\IncidentFlow\web
+npm install
+\end{lstlisting}
+
+\subsection{Step 2 --- start the API (terminal 1)}
+
+\begin{lstlisting}
+cd D:\IncidentFlow\api
+php artisan serve --port=8000
+\end{lstlisting}
+
+\expect{\texttt{INFO Server running on [http://127.0.0.1:8000]}. Leave this
+window open.}
+
+\subsection{Step 3 --- start the web app (terminal 2)}
+
+\begin{lstlisting}
+cd D:\IncidentFlow\web
+npm run dev
+\end{lstlisting}
+
+\expect{A short box showing \texttt{Local: http://localhost:5173/}. Leave this
+window open.}
+
+\subsection{Step 4 --- open it}
+
+Go to \url{http://localhost:5173}.
+
+\warnbox{At this point live updates are switched off. Everything else works
+--- you just have to reload a page to see somebody else's changes. If that is
+enough for you, skip to Section~\ref{sec:health}. To turn live updates on,
+continue below.}
+
+\subsection{Step 5 --- optional: live updates}
+
+Live updates need Redis and the realtime service. Redis is already installed
+at \texttt{D:\textbackslash redis}.
+
+\textbf{Terminal 3 --- start Redis:}
+
+\begin{lstlisting}
+D:\redis\redis-server.exe D:\redis\incidentflow.conf
+\end{lstlisting}
+
+Check it answers, in any terminal:
+
+\begin{lstlisting}
+D:\redis\redis-cli.exe ping
+\end{lstlisting}
+
+\expect{\texttt{PONG}}
+
+\textbf{Now tell the API to use it.} Open
+\texttt{D:\textbackslash IncidentFlow\textbackslash api\textbackslash .env}
+in a text editor and change these lines (add them if missing):
+
+\begin{lstlisting}
+REALTIME_ENABLED=true
+REDIS_CLIENT=predis
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+CACHE_STORE=redis
+QUEUE_CONNECTION=redis
+\end{lstlisting}
+
+Stop the API (click its terminal, press \cmd{Ctrl+C}) and start it again.
+
+\textbf{Terminal 4 --- start the realtime service.} This is one long command;
+type it as a single line, or paste it.
+
+\begin{lstlisting}
+cd D:\IncidentFlow\realtime
+$env:PORT="3001"
+$env:REDIS_URL="redis://127.0.0.1:6379"
+$env:JWT_PUBLIC_KEY_PATH="D:/IncidentFlow/api/storage/keys/jwt-public.pem"
+$env:JWT_ISSUER="incidentflow-api"
+$env:JWT_AUDIENCE="incidentflow-realtime"
+$env:CORS_ORIGINS="http://localhost:5173"
+npx tsx src/index.ts
+\end{lstlisting}
+
+\expect{Two lines of JSON, the second containing
+\texttt{"message":"realtime service listening"}.}
+
+\textbf{Terminal 5 --- optional, the job worker.} Without this, emails are
+prepared but never sent.
+
+\begin{lstlisting}
+cd D:\IncidentFlow\api
+php artisan queue:work redis
+\end{lstlisting}
+
+\newpage
+% ===========================================================================
+\section{Checking each part is alive}
+\label{sec:health}
+
+Before touching the interface, confirm each piece is responding. Run these in
+a spare terminal.
+
+\subsection{The API}
+
+\begin{lstlisting}
+curl http://localhost:8000/api/v1/health/live
+\end{lstlisting}
+
+\expect{\texttt{\{"status":"ok","service":"incidentflow-api",...\}}}
+
+Now the deeper check, which tests the database and cache too:
+
+\begin{lstlisting}
+curl http://localhost:8000/api/v1/health/ready
+\end{lstlisting}
+
+\expect{\texttt{"status":"ready"} and \texttt{"degraded":false}.}
+
+\note{If you skipped the Redis step, this will say \texttt{"degraded":true}.
+That is not an error --- it means ``everything essential works, but live
+updates are unavailable.'' The system is designed to keep running without
+Redis rather than fall over.}
+
+\subsection{The realtime service}
+
+Only if you completed Step 5.
+
+\begin{lstlisting}
+curl http://localhost:3001/readyz
+\end{lstlisting}
+
+\expect{\texttt{\{"status":"ready","checks":\{"redis":"ok",...\}\}}}
+
+\subsection{Verification checklist}
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox The API answers \texttt{health/live} with \texttt{ok}.
+\cbox The API answers \texttt{health/ready} with \texttt{ready}.
+\cbox The web page loads and shows a sign-in form.
+\cbox (If applicable) Redis answers \texttt{PONG}.
+\cbox (If applicable) The realtime service answers \texttt{ready}.
+\end{itemize}
+
+\newpage
+% ===========================================================================
+\section{The demo accounts}
+
+Six accounts exist. \textbf{The password for every one is} \cmd{incidentflow}.
+
+They are not interchangeable --- each sees a genuinely different application.
+That is the point of the next several sections.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{6.1cm}>{\raggedright\arraybackslash}p{3cm}>{\raggedright\arraybackslash}p{4.9cm}@{}}
+\toprule
+\textbf{Email} & \textbf{Role} & \textbf{Can do} \\
+\midrule
+\texttt{admin@incidentflow.test} & Administrator & Everything, plus the audit log \\
+\texttt{commander@incidentflow.test} & Incident Commander & Assign people, change severity, publish postmortems, export \\
+\texttt{responder@incidentflow.test} & Responder & Move an incident through its stages, post updates \\
+\texttt{responder2@incidentflow.test} & Responder & The same, again --- so there is somebody to assign \\
+\texttt{reporter@incidentflow.test} & Reporter & Report incidents, comment \\
+\texttt{viewer@incidentflow.test} & Viewer & Read only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{Sign in and out often as you work through this manual. The quickest way
+to understand the permission system is to look at the same screen as two
+different people.}
+
+\newpage
+% ===========================================================================
+\section{Guided tour}
+
+Work through these in order. Each has instructions, then a checklist.
+
+% ---------------------------------------------------------------------------
+\subsection{The incident register}
+
+Sign in as \texttt{reporter@incidentflow.test}.
+
+You land on a table of incidents. Things to try:
+
+\begin{enumerate}[leftmargin=1.2cm,itemsep=3pt]
+\item Type \cmd{checkout} into the search box. The list narrows as you type.
+\item Set \textbf{All severities} to \textbf{SEV1}. Only the most serious
+  incidents remain.
+\item Tick \textbf{Active only}. Anything already resolved disappears.
+\item Clear the filters again.
+\end{enumerate}
+
+Look at the \textbf{Running / resolved in} column. For open incidents this is
+a live clock showing how long the problem has been going on.
+
+Look at the navigation bar. Count the tabs --- there should be \textbf{four}.
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox 17 incidents are listed.
+\cbox Searching narrows the list.
+\cbox Filtering by severity works.
+\cbox There are four navigation tabs, and \emph{no} Admin tab.
+\cbox A \textbf{Report incident} button is visible.
+\end{itemize}
+
+\note{The missing Admin tab is deliberate. A Reporter has no permission to
+read the audit log, so the tab does not exist for them --- it is not merely
+greyed out.}
+
+% ---------------------------------------------------------------------------
+\subsection{Reporting an incident}
+
+Still signed in as the Reporter, click \textbf{Report incident}.
+
+Fill it in:
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=2pt]
+\item \textbf{What is happening?} --- \emph{Card payments failing for UK customers}
+\item \textbf{Severity} --- SEV-1
+\item \textbf{Service} --- Checkout API
+\item \textbf{What do we know?} --- anything you like
+\end{itemize}
+
+Read the amber warning before you submit. It tells you what choosing SEV-1
+actually causes. Then click \textbf{Report incident}.
+
+You are taken straight to the new incident.
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox You are moved to the new incident's own page.
+\cbox It has a reference like \texttt{INC-0018}.
+\cbox A red \textbf{Open} badge and a \textbf{Postmortem required} badge appear.
+\cbox The timeline already has one entry: \emph{``... reported the incident''}.
+\cbox There are \textbf{no} buttons to change the status.
+\end{itemize}
+
+\warnbox{That last point is the important one. A Reporter cannot move an
+incident forward. Try to find a way to do it --- you should not be able to.}
+
+\subsubsection*{Check the emails went out}
+
+If you are on Path A (Docker), open \url{http://localhost:8025}.
+
+\expect{Four emails, one to each person who can be paged. There is
+\emph{nothing} addressed to the Reporter or the Viewer --- neither can be
+assigned to an incident, so neither is on the on-call rota.}
+
+% ---------------------------------------------------------------------------
+\subsection{Working the incident}
+
+Sign out. Sign in as \texttt{responder@incidentflow.test}. Open the incident
+you just created.
+
+Notice you now have buttons. Count them --- there are \textbf{two}:
+\textbf{Mark acknowledged} and \textbf{Mark resolved}.
+
+\note{There is no ``Mark closed'' button. An incident cannot be closed before
+it has been resolved, so that option is not offered. The buttons on screen are
+generated from the rules, so you can never be shown an action that would be
+refused.}
+
+Click \textbf{Mark acknowledged}. Watch the buttons change to \textbf{Mark
+mitigated} and \textbf{Mark resolved}.
+
+Now scroll down and try the two writing areas:
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=2pt]
+\item \textbf{Post an update} --- the public record of what is happening.
+  Tick \emph{Safe for a customer status page} before posting one.
+\item \textbf{Discussion} --- internal chat between responders.
+\end{itemize}
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox Exactly two status buttons appear before you click.
+\cbox After acknowledging, the badge turns amber and reads \textbf{Acknowledged}.
+\cbox The buttons change to Mitigated / Resolved.
+\cbox The timeline gains \emph{``... acknowledged the incident''}.
+\cbox A posted update shows a green \textbf{Public} tag when you tick the box.
+\cbox Your comment appears in Discussion immediately.
+\cbox The right-hand panel shows \textbf{Time to acknowledge} with a target.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Commanding the incident}
+
+Sign out. Sign in as \texttt{commander@incidentflow.test}. Open the same
+incident and scroll to the right-hand column.
+
+You now have two panels the Responder did not: \textbf{Responders} and
+\textbf{Change severity}.
+
+\subsubsection*{Assigning someone}
+
+Open the \textbf{Assign someone...} dropdown and read the names.
+
+\expect{Only people who can actually be paged. Ahmed Hassan (Reporter) and
+Sofia Rossi (Viewer) are absent --- assigning a Viewer would look like
+coverage while providing none.}
+
+Pick someone. They appear in the list with a button to remove them again.
+
+\subsubsection*{Changing severity}
+
+This one is worth doing carefully, because the behaviour is deliberately
+asymmetric.
+
+\begin{enumerate}[leftmargin=1.2cm,itemsep=3pt]
+\item Choose a \emph{higher} severity (e.g. SEV-1 to SEV-2 is lower; go the
+  other way). No extra field appears --- making something more serious needs
+  no justification.
+\item Now choose a \emph{lower} severity, such as SEV-4. A \textbf{reason}
+  box appears, and it is required.
+\end{enumerate}
+
+\note{Quietly downgrading an incident changes whether a postmortem is
+required and how it appears in every later report. So a downgrade goes on the
+record; an escalation does not need to.}
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox The Responders and Change severity panels are visible.
+\cbox The assignment dropdown excludes the Reporter and the Viewer.
+\cbox An assigned person appears in the list with a remove button.
+\cbox Raising severity asks for no reason.
+\cbox Lowering severity demands a written reason.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Live updates}
+\label{sec:live}
+
+\warnbox{This section only works if you completed Path A, or Path B Step 5.
+Look at the top right of the screen: if it says a green \textbf{Live}, you are
+ready. If it says amber \textbf{Reconnecting...}, skip this section.}
+
+This is best seen with two browser windows side by side.
+
+\begin{enumerate}[leftmargin=1.2cm,itemsep=3pt]
+\item In your normal window, stay signed in as the Commander, on an incident.
+\item Open a \textbf{private / incognito} window (\cmd{Ctrl+Shift+N} in
+  Chrome). Go to the same address and sign in as
+  \texttt{responder@incidentflow.test}. Open the \emph{same} incident.
+\item Arrange the windows so you can see both.
+\item In the \textbf{private} window, post a comment.
+\item Watch the \textbf{other} window without touching it.
+\end{enumerate}
+
+\expect{The comment and a new timeline entry appear in the first window within
+a second or two. You did not reload anything.}
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox The header shows a green \textbf{Live} badge.
+\cbox A change made in one window appears in the other unprompted.
+\cbox The incident list also updates itself the same way.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Resolving, and the postmortem}
+
+As the Commander, click \textbf{Mark resolved}.
+
+Notice the buttons become \textbf{Mark closed} and \textbf{Mark
+acknowledged}. Resolved is not the end --- if the problem returns you reopen
+it, and the system discards the old resolution time rather than flattering the
+statistics.
+
+Now scroll to the \textbf{Postmortem} section.
+
+\begin{enumerate}[leftmargin=1.2cm,itemsep=3pt]
+\item Read the four required sections. Each is labelled \emph{required ---
+  blocks publishing} in amber, and each has a hint telling you what belongs
+  there.
+\item Fill in \textbf{Summary} only, then click \textbf{Start postmortem}.
+\item Look at the \textbf{Publish} button --- it is greyed out, and a note
+  below lists exactly what is still missing.
+\item Now fill in Root cause, Impact and Resolution. Watch each label change
+  from amber \emph{required} to green \emph{complete}.
+\item Click \textbf{Save draft}, then \textbf{Publish}.
+\end{enumerate}
+
+\expect{A green banner naming who published it and when. Every box becomes
+read-only, and the Save and Publish buttons disappear entirely.}
+
+Now try to edit it. You cannot --- and neither can an administrator.
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox Four sections are marked as required.
+\cbox Publish is disabled while any of them is empty.
+\cbox The message below names precisely which are missing.
+\cbox Labels turn green as you complete each one.
+\cbox Publish becomes available only when all four are filled.
+\cbox After publishing, every field is locked and the buttons vanish.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{The metrics dashboard}
+
+Click \textbf{Metrics}. Switch between the 7, 30 and 90 day buttons.
+
+Read the two large numbers carefully. Under \textbf{Mean time to
+acknowledge} there is a smaller line reading something like
+\emph{p50 9m $\cdot$ p95 5h}.
+
+\note{This is the most important idea on the page. ``p50'' is the middle
+case: half of all incidents were picked up faster than that. ``p95'' is the
+bad case: one in twenty took at least that long. An average on its own hides
+both. If the average is 46 minutes but the middle case is 9 minutes, then
+most incidents are handled quickly and a few are handled very slowly --- and
+those are two completely different problems to fix.}
+
+Scroll down for the SLA table and the two charts. Hover over a bar in
+\textbf{Opened vs resolved} to see that day's figures.
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox Four summary figures appear at the top.
+\cbox Each average is accompanied by p50 and p95.
+\cbox The SLA table shows a target and an attainment per severity.
+\cbox Both charts draw, and the bar chart responds to hovering.
+\cbox Changing the period changes the numbers.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Services}
+
+Click \textbf{Services}. These are the systems that can break.
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox Five services are listed.
+\cbox Each shows a tier and the team that owns it.
+\cbox Services with live incidents show a red count.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Exporting}
+
+Still as the Commander, go back to \textbf{Incidents}. There is now an
+\textbf{Export CSV} button.
+
+Do this in order, because the point is what the file contains:
+
+\begin{enumerate}[leftmargin=1.2cm,itemsep=3pt]
+\item Without any filters, click \textbf{Export CSV}. Open the downloaded
+  file in Excel. Count the rows.
+\item Back in the browser, tick \textbf{Active only}. Note how many rows the
+  table now shows.
+\item Click \textbf{Export CSV} again and open that file.
+\end{enumerate}
+
+\expect{The second file contains exactly the rows that were on screen ---
+not everything. The export always matches what you were looking at.}
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox A file downloads, named after the organisation and the date.
+\cbox It opens in Excel with readable column headings.
+\cbox Filtering the screen changes what the file contains.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Administration}
+
+Sign out. Sign in as \texttt{admin@incidentflow.test}.
+
+Count the navigation tabs --- there are now \textbf{five}. The \textbf{Admin}
+tab has appeared.
+
+Open it. The top half lists everyone and their role. Scroll down for the
+audit log.
+
+\expect{Every action you have taken during this tour, most recent first, with
+who did it and when. Underneath each is a long identifier --- that is the
+tracking number for that request, shared across all parts of the system.}
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox Five navigation tabs, including Admin.
+\cbox All six members are listed with their roles.
+\cbox The audit log shows your actions from this session.
+\cbox Each entry names a person.
+\cbox Your CSV exports appear in the log too.
+\end{itemize}
+
+\note{Exports are recorded because taking customer data out of the system is
+itself something worth being able to account for later.}
+
+\newpage
+% ===========================================================================
+\section{Checking the promises yourself}
+
+The sections above show the product working. These show it refusing to
+misbehave. Each is a claim you can test.
+
+% ---------------------------------------------------------------------------
+\subsection{A Viewer really is read-only}
+
+Sign in as \texttt{viewer@incidentflow.test}.
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox No \textbf{Report incident} button anywhere.
+\cbox Opening an incident offers no status buttons.
+\cbox No comment box.
+\cbox No Admin tab.
+\end{itemize}
+
+Now try to get around the interface. In the address bar, type
+\url{http://localhost:5173/admin} directly.
+
+\expect{You are not shown the audit log. The restriction lives in the server,
+not in whether a button was drawn.}
+
+% ---------------------------------------------------------------------------
+\subsection{An incident cannot skip stages}
+
+The interface never offers an illegal step, so this must be tested directly
+against the API.
+
+First get a login token (this is one long line):
+
+\begin{lstlisting}
+curl -X POST http://localhost:8000/api/v1/auth/login -H "Content-Type: application/json" -d "{\"email\":\"responder@incidentflow.test\",\"password\":\"incidentflow\"}"
+\end{lstlisting}
+
+Copy the long string after \texttt{"access\_token":}. Now try to close an
+incident that is merely open --- replace \texttt{PASTE\_TOKEN} with it, and
+\texttt{18} with any open incident's number:
+
+\begin{lstlisting}
+curl -X POST http://localhost:8000/api/v1/incidents/18/status -H "Authorization: Bearer PASTE_TOKEN" -H "X-Organization: northwind" -H "Content-Type: application/json" -d "{\"status\":\"closed\"}"
+\end{lstlisting}
+
+\expect{A refusal containing \texttt{"code":"incident.illegal\_transition"},
+and helpfully a list of which steps \emph{are} allowed from here.}
+
+% ---------------------------------------------------------------------------
+\subsection{A double-submitted report does not create two incidents}
+
+If someone taps ``Report'' twice on a bad connection, only one incident should
+exist. Run this command \emph{twice}, unchanged:
+
+\begin{lstlisting}
+curl -X POST http://localhost:8000/api/v1/incidents -H "Authorization: Bearer PASTE_TOKEN" -H "X-Organization: northwind" -H "Content-Type: application/json" -H "Idempotency-Key: my-test-key-123" -d "{\"title\":\"Testing duplicate submission\",\"severity\":\"sev3\"}"
+\end{lstlisting}
+
+\expect{Both responses describe the \emph{same} incident, with the same
+reference number. Check the incident list --- there is only one.}
+
+\note{The \texttt{Idempotency-Key} is what makes this safe. The application
+generates one automatically for every report you file through the interface.}
+
+% ---------------------------------------------------------------------------
+\subsection{History cannot be rewritten}
+
+Look at any incident's timeline. There is no edit button and no delete button
+--- not for a Responder, not for a Commander, not for an Administrator.
+
+This is enforced in three separate places, so that removing one would not be
+enough. The reason is simple: a postmortem is written from the timeline, so if
+the timeline could be altered afterwards, nothing concluded from it could be
+trusted.
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox No timeline entry can be edited or deleted by anyone.
+\cbox No audit log entry can be edited or deleted by anyone.
+\cbox A published postmortem cannot be edited, even by its author.
+\end{itemize}
+
+% ---------------------------------------------------------------------------
+\subsection{Repeated login attempts are throttled}
+
+Run this six times quickly, with the wrong password on purpose:
+
+\begin{lstlisting}
+curl -X POST http://localhost:8000/api/v1/auth/login -H "Content-Type: application/json" -d "{\"email\":\"admin@incidentflow.test\",\"password\":\"wrong\"}"
+\end{lstlisting}
+
+\expect{The first few refuse politely. Around the sixth, you get
+\texttt{"code":"rate\_limited"} and a \texttt{Retry-After} header.}
+
+Also notice: guessing an address that does not exist gives \emph{exactly} the
+same refusal as a wrong password. The login form cannot be used to discover
+who has an account.
+
+\newpage
+% ===========================================================================
+\section{Running the automated tests}
+
+You do not need the application running for these. Each is independent.
+
+\subsection{The API}
+
+\begin{lstlisting}
+cd D:\IncidentFlow\api
+php vendor/bin/phpunit
+\end{lstlisting}
+
+\expect{\texttt{OK (104 tests, 518 assertions)} in green, after a few seconds.}
+
+\subsection{The realtime service}
+
+\begin{lstlisting}
+cd D:\IncidentFlow\realtime
+npm test
+\end{lstlisting}
+
+\expect{\texttt{Tests 26 passed (26)}}
+
+\subsection{The web app}
+
+\begin{lstlisting}
+cd D:\IncidentFlow\web
+npm test
+\end{lstlisting}
+
+\expect{\texttt{Tests 23 passed (23)}}
+
+\subsection{The browser tests}
+
+These drive a real browser through the whole application, so the system must
+be running first.
+
+\begin{lstlisting}
+cd D:\IncidentFlow\web
+npx playwright install chromium
+npm run e2e
+\end{lstlisting}
+
+\expect{\texttt{7 passed}, taking a couple of minutes.}
+
+\note{If you are on Path B rather than Docker, add
+\cmd{E2E\_EXPECT\_TIMEOUT=45000} before the command. The development server
+answers one request at a time, so pages load more slowly than the tests
+expect by default.}
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\cbox API: 104 tests pass.
+\cbox Realtime: 26 tests pass.
+\cbox Web: 23 tests pass.
+\cbox Browser: 7 tests pass.
+\end{itemize}
+
+\newpage
+% ===========================================================================
+\section{When something goes wrong}
+
+\subsection{The page is blank or says it cannot load}
+
+The API is almost certainly not running. Check its terminal window, then:
+
+\begin{lstlisting}
+curl http://localhost:8000/api/v1/health/live
+\end{lstlisting}
+
+If that fails, restart the API.
+
+\subsection{``Address already in use''}
+
+Something is already using that port --- often a copy of this application you
+forgot to stop. On Windows:
+
+\begin{lstlisting}
+netstat -ano | findstr :8000
+taskkill /F /PID <the number from the last column>
+\end{lstlisting}
+
+\subsection{The header says ``Reconnecting...'' forever}
+
+Live updates are unavailable. In order, check:
+
+\begin{enumerate}[leftmargin=1.2cm,itemsep=2pt]
+\item Is Redis running? \cmd{D:\textbackslash redis\textbackslash redis-cli.exe ping}
+\item Is the realtime service running? \cmd{curl http://localhost:3001/readyz}
+\item Does the API's \texttt{.env} say \texttt{REALTIME\_ENABLED=true}?
+\item Did you restart the API after changing that?
+\end{enumerate}
+
+\warnbox{This never stops the rest of the application working. Everything
+except automatic updating continues normally --- you just reload to see
+changes.}
+
+\subsection{Every page says you are signed out}
+
+The security keys are missing or were regenerated. Rebuild them:
+
+\begin{lstlisting}
+cd D:\IncidentFlow\api
+php artisan jwt:keys --force
+\end{lstlisting}
+
+Then restart the API and the realtime service, and sign in again.
+
+\subsection{Starting completely fresh}
+
+This deletes all data and rebuilds the demo from scratch. It is safe --- there
+is nothing real in here.
+
+\begin{lstlisting}
+cd D:\IncidentFlow\api
+php artisan migrate:fresh --seed
+\end{lstlisting}
+
+\subsection{Stopping everything}
+
+Docker: press \cmd{Ctrl+C} in its window, then \cmd{docker compose down}.
+
+Manual: press \cmd{Ctrl+C} in each terminal window.
+
+\newpage
+% ===========================================================================
+\appendix
+\section{Command reference}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{8.6cm}>{\raggedright\arraybackslash}p{7cm}@{}}
+\toprule
+\textbf{Command} & \textbf{What it does} \\
+\midrule
+\texttt{docker compose up -{}-build} & Start everything (Path A) \\
+\texttt{docker compose down} & Stop everything \\
+\texttt{docker compose logs -f api} & Watch the API's log \\
+\midrule
+\texttt{php artisan serve -{}-port=8000} & Start the API (Path B) \\
+\texttt{php artisan queue:work redis} & Start the job worker \\
+\texttt{php artisan migrate -{}-seed} & Create tables, load demo data \\
+\texttt{php artisan migrate:fresh -{}-seed} & Wipe and rebuild everything \\
+\texttt{php artisan jwt:keys -{}-force} & Regenerate the security keys \\
+\texttt{php artisan incidentflow:prune -{}-dry-run} & Show what housekeeping would delete \\
+\midrule
+\texttt{npm run dev} & Start the web app \\
+\texttt{npm test} & Run that project's tests \\
+\texttt{npm run e2e} & Run the browser tests \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Who can do what}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.4cm}ccccc@{}}
+\toprule
+& \rotatebox{60}{Viewer} & \rotatebox{60}{Reporter} & \rotatebox{60}{Responder} & \rotatebox{60}{Commander} & \rotatebox{60}{Admin} \\
+\midrule
+View incidents        & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+View metrics          & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+Report an incident    &              & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+Comment               &              & $\checkmark$ & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+Change status         &              &              & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+Post updates          &              &              & $\checkmark$ & $\checkmark$ & $\checkmark$ \\
+Assign responders     &              &              &              & $\checkmark$ & $\checkmark$ \\
+Change severity       &              &              &              & $\checkmark$ & $\checkmark$ \\
+Publish postmortems   &              &              &              & $\checkmark$ & $\checkmark$ \\
+Export to CSV         &              &              &              & $\checkmark$ & $\checkmark$ \\
+Manage services       &              &              &              &              & $\checkmark$ \\
+Manage members        &              &              &              &              & $\checkmark$ \\
+Read the audit log    &              &              &              &              & $\checkmark$ \\
+Delete incidents      &              &              &              &              & $\checkmark$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each role includes everything the one before it can do.
+
+\section{The stages of an incident}
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Stage} & \textbf{Means} & \textbf{Can move to} \\
+\midrule
+Open         & Reported, nobody has responded  & Acknowledged, Resolved \\
+Acknowledged & Somebody is working on it       & Mitigated, Resolved \\
+Mitigated    & Under control, not fixed        & Resolved, Acknowledged \\
+Resolved     & Fixed                           & Closed, Acknowledged \\
+Closed       & Finished                        & --- nothing \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two rules worth knowing:
+
+\begin{itemize}[leftmargin=1.2cm,itemsep=3pt]
+\item Nothing ever returns to \textbf{Open}. Once a person has seen it, the
+  ``nobody has looked at this'' state would no longer be true.
+\item \textbf{Resolved} can go back to \textbf{Acknowledged} if the problem
+  returns. When that happens the recorded resolution time is discarded --- an
+  incident that came back was never really resolved.
+\end{itemize}
+
+\section{Further reading}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.4cm}>{\raggedright\arraybackslash}p{9.6cm}@{}}
+\toprule
+\texttt{README.md} & Overview and quick start \\
+\texttt{docs/architecture.md} & Why the system is built this way \\
+\texttt{docs/api.md} & Every endpoint, in detail \\
+\texttt{docs/openapi.yaml} & The machine-readable API specification \\
+\texttt{docs/runbook.md} & Deploying it, and what to do when it breaks \\
+\texttt{docs/interview-notes.md} & The design decisions, argued in depth \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vfill
+\begin{center}
+\color{muted}\small
+If every checkbox in this manual ticks, the system is working as designed.
+\end{center}
+
+\end{document}

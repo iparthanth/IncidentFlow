@@ -1,0 +1,213 @@
+# ---------------------------------------------------------------------------
+# IncidentFlow — production overlay
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Applied on top of the development file, this overlay changes four things that
+# matter:
+#
+#   1. No bind mounts. The image is the artifact; a container that reads code
+#      from the host is not the thing that was tested in CI.
+#   2. No published database, Redis or mail ports. Only nginx is reachable.
+#   3. Secrets come from the environment, never from defaults in this file.
+#   4. Resource limits and restart policies, so one runaway container cannot
+#      starve the host during an incident.
+# ---------------------------------------------------------------------------
+
+name: incidentflow
+
+x-api-environment: &api-environment
+  APP_NAME: IncidentFlow
+  APP_ENV: production
+  APP_DEBUG: "false"
+  # Required. The stack refuses to boot without them rather than falling back
+  # to a default that would be identical on every deployment in the world.
+  APP_KEY: ${APP_KEY:?APP_KEY must be set}
+  APP_URL: ${APP_URL:?APP_URL must be set}
+  APP_FRONTEND_URL: ${APP_FRONTEND_URL:?APP_FRONTEND_URL must be set}
+  APP_VERSION: ${APP_VERSION:-unknown}
+  LOG_CHANNEL: stack
+  LOG_STACK: json
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DB_CONNECTION: pgsql
+  DB_HOST: ${DB_HOST:-postgres}
+  DB_PORT: ${DB_PORT:-5432}
+  DB_DATABASE: ${DB_DATABASE:?DB_DATABASE must be set}
+  DB_USERNAME: ${DB_USERNAME:?DB_USERNAME must be set}
+  DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+  REDIS_CLIENT: predis
+  REDIS_HOST: ${REDIS_HOST:-redis}
+  REDIS_PORT: ${REDIS_PORT:-6379}
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+  CACHE_STORE: redis
+  QUEUE_CONNECTION: redis
+  SESSION_DRIVER: redis
+  REALTIME_ENABLED: "true"
+  REALTIME_CHANNEL_PREFIX: ${REALTIME_CHANNEL_PREFIX:-incidentflow}
+  MAIL_MAILER: ${MAIL_MAILER:-smtp}
+  MAIL_HOST: ${MAIL_HOST:?MAIL_HOST must be set}
+  MAIL_PORT: ${MAIL_PORT:-587}
+  MAIL_USERNAME: ${MAIL_USERNAME:-}
+  MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+  MAIL_SCHEME: ${MAIL_SCHEME:-tls}
+  MAIL_FROM_ADDRESS: ${MAIL_FROM_ADDRESS:?MAIL_FROM_ADDRESS must be set}
+  # TLS terminates at the edge, so the refresh cookie is Secure and Strict.
+  JWT_REFRESH_COOKIE_SECURE: "true"
+  JWT_REFRESH_COOKIE_SAMESITE: strict
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    <<: *restart
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:?DB_DATABASE must be set}
+      POSTGRES_USER: ${DB_USERNAME:?DB_USERNAME must be set}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+    # Nothing outside the compose network may reach the database.
+    ports: !override []
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  redis:
+    <<: *restart
+    command: >
+      redis-server
+      --appendonly no
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    ports: !override []
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  # Development-only. Real deployments use a real provider via MAIL_HOST.
+  mailpit:
+    profiles: ["never"]
+
+  api:
+    <<: *restart
+    image: ${REGISTRY:-ghcr.io/incidentflow}/api:${APP_VERSION:-latest}
+    build:
+      context: ./api
+      target: runtime
+      args:
+        APP_VERSION: ${APP_VERSION:-unknown}
+    environment: *api-environment
+    # No source mount: the image is the artifact.
+    volumes: !override
+      - jwt-keys:/var/www/html/storage/keys:ro
+    deploy:
+      replicas: ${API_REPLICAS:-2}
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  migrate:
+    image: ${REGISTRY:-ghcr.io/incidentflow}/api:${APP_VERSION:-latest}
+    environment: *api-environment
+    # Migrations only. Seeding demo accounts into production would be a data
+    # breach with extra steps, and DatabaseSeeder refuses to run there anyway.
+    command: ["php", "artisan", "migrate", "--force"]
+    volumes: !override
+      - jwt-keys:/var/www/html/storage/keys:ro
+    restart: "no"
+
+  horizon:
+    <<: *restart
+    image: ${REGISTRY:-ghcr.io/incidentflow}/api:${APP_VERSION:-latest}
+    environment: *api-environment
+    volumes: !override
+      - jwt-keys:/var/www/html/storage/keys:ro
+    # Long enough for an in-flight notification send to finish rather than
+    # being killed and retried, which would send it twice.
+    stop_grace_period: 60s
+    deploy:
+      replicas: ${HORIZON_REPLICAS:-1}
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  scheduler:
+    <<: *restart
+    image: ${REGISTRY:-ghcr.io/incidentflow}/api:${APP_VERSION:-latest}
+    environment: *api-environment
+    volumes: !override
+      - jwt-keys:/var/www/html/storage/keys:ro
+    # Exactly one. The scheduled tasks take a shared lock anyway, but running a
+    # single instance means the lock is a safety net rather than the mechanism.
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256m
+
+  realtime:
+    <<: *restart
+    image: ${REGISTRY:-ghcr.io/incidentflow}/realtime:${APP_VERSION:-latest}
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@${REDIS_HOST:-redis}:${REDIS_PORT:-6379}
+      REDIS_CHANNEL_PREFIX: ${REALTIME_CHANNEL_PREFIX:-incidentflow}
+      JWT_PUBLIC_KEY_PATH: /keys/jwt-public.pem
+      JWT_ISSUER: incidentflow-api
+      JWT_AUDIENCE: incidentflow-realtime
+      CORS_ORIGINS: ${APP_FRONTEND_URL}
+      MAX_CONNECTIONS: ${REALTIME_MAX_CONNECTIONS:-10000}
+      SHUTDOWN_TIMEOUT_MS: 15000
+    volumes:
+      - jwt-keys:/keys:ro
+    # Long-lived connections need time to be told to reconnect elsewhere before
+    # the process goes away; see the shutdown sequence in src/index.ts.
+    stop_grace_period: 30s
+    deploy:
+      replicas: ${REALTIME_REPLICAS:-2}
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384m
+
+  web:
+    <<: *restart
+    image: ${REGISTRY:-ghcr.io/incidentflow}/web:${APP_VERSION:-latest}
+    build:
+      context: ./web
+      target: runtime
+      args:
+        VITE_APP_VERSION: ${APP_VERSION:-unknown}
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 128m
+
+  nginx:
+    <<: *restart
+    ports: !override
+      - "${HTTP_PORT:-80}:80"
+    volumes: !override
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # Only the document root — public/index.php and the static entry point.
+      # The application source is inside the API image, not here.
+      - api-public:/var/www/html/public:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+volumes:
+  postgres-data:
+  api-vendor:
+  api-public:
+  jwt-keys:

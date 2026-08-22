@@ -1,0 +1,611 @@
+openapi: 3.1.0
+
+info:
+  title: IncidentFlow API
+  version: 1.0.0
+  description: |
+    Incident lifecycle, coordination and reliability reporting.
+
+    Conventions that apply everywhere:
+
+    - Successful responses wrap the payload in `data`.
+    - Errors use one envelope. Switch on `error.code`, never on `error.message`.
+    - `X-Request-Id` correlates a request across nginx, the API, the queue
+      workers and the realtime service. Quote it when reporting a problem.
+    - `X-Organization` selects the tenant. It may be omitted only when the
+      caller belongs to exactly one.
+  license:
+    name: MIT
+
+servers:
+  - url: /api/v1
+    description: Same-origin, behind nginx
+
+tags:
+  - name: Authentication
+  - name: Incidents
+  - name: Timeline
+  - name: Postmortems
+  - name: Metrics
+  - name: Realtime
+  - name: Administration
+  - name: Health
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      description: |
+        Dependency-free by design. If this checked PostgreSQL, a database
+        outage would make the orchestrator restart every container and turn a
+        recoverable failure into a crash loop.
+      security: []
+      responses:
+        '200':
+          description: The process is running
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+                  service: { type: string }
+                  version: { type: string }
+                  time: { type: string, format: date-time }
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      description: |
+        Checks the database and cache. Redis is reported but does not fail the
+        probe: without it the API degrades to a polling frontend rather than
+        breaking, and refusing all traffic would be a self-inflicted outage.
+      security: []
+      responses:
+        '200': { description: Ready to receive traffic }
+        '503': { description: A critical dependency is unavailable }
+
+  /auth/register:
+    post:
+      tags: [Authentication]
+      summary: Create an account and its first organization
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, password_confirmation, organization_name]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 120 }
+                email: { type: string, format: email }
+                password:
+                  type: string
+                  minLength: 12
+                  description: |
+                    Length first, no composition rules. In deployed environments
+                    the value is also checked against the Have I Been Pwned
+                    corpus — long and unbreached is what resists credential
+                    stuffing; "one uppercase and a symbol" pushes people toward
+                    Password1!.
+                password_confirmation: { type: string }
+                organization_name: { type: string, minLength: 2, maxLength: 120 }
+      responses:
+        '201':
+          description: Created, with a refresh cookie
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: HttpOnly, Secure, SameSite=Strict, scoped to /api/v1/auth
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Exchange credentials for an access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+          description: Signed in
+        '401':
+          description: |
+            Identical response for an unknown email and a wrong password, so the
+            endpoint cannot be used as a user directory.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403': { description: The account has been deactivated }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      summary: Rotate the refresh token
+      description: |
+        Reads the HttpOnly cookie, revokes it, and issues a new pair. Presenting
+        an already-rotated token means a replay or a theft, so the entire token
+        family is revoked. Clients must therefore collapse concurrent refreshes
+        into a single request.
+      security: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResponse' }
+          description: Rotated
+        '401': { description: Missing, expired, revoked or reused }
+
+  /auth/me:
+    get:
+      tags: [Authentication]
+      summary: The current user, their memberships and resolved permissions
+      responses:
+        '200': { description: OK }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /auth/logout:
+    post:
+      tags: [Authentication]
+      summary: End this session
+      description: |
+        Revokes the refresh token and denylists the access token's `jti` for its
+        remaining lifetime — without which "sign out" would be a suggestion for
+        up to fifteen minutes.
+      responses:
+        '200': { description: Signed out }
+
+  /incidents:
+    get:
+      tags: [Incidents]
+      summary: List incidents
+      parameters:
+        - { name: status, in: query, schema: { type: array, items: { $ref: '#/components/schemas/Status' } }, style: form, explode: true }
+        - { name: severity, in: query, schema: { type: array, items: { $ref: '#/components/schemas/Severity' } }, style: form, explode: true }
+        - { name: service_id, in: query, schema: { type: integer } }
+        - { name: assignee_id, in: query, schema: { type: integer } }
+        - { name: q, in: query, schema: { type: string, maxLength: 200 }, description: 'Title, reference and description. `%` and `_` are treated literally.' }
+        - { name: active_only, in: query, schema: { type: boolean } }
+        - name: sort
+          in: query
+          description: Whitelisted — anything else is a 422, because an unvalidated sort is a column name injected into ORDER BY.
+          schema:
+            type: string
+            enum: [created_at, updated_at, severity, status, resolved_at, acknowledged_at, reference, title]
+        - { name: direction, in: query, schema: { type: string, enum: [asc, desc] } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: per_page, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        '200':
+          description: A page of incidents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Incident' } }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+    post:
+      tags: [Incidents]
+      summary: Report an incident
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKeyRequired'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, severity]
+              properties:
+                title: { type: string, minLength: 5, maxLength: 200 }
+                description: { type: string, maxLength: 20000 }
+                impact: { type: string, maxLength: 5000 }
+                severity: { $ref: '#/components/schemas/Severity' }
+                service_id:
+                  type: [integer, 'null']
+                  description: Validated scoped to the caller's organization; an id from another tenant is a 422.
+                commander_id: { type: [integer, 'null'] }
+                assignee_ids: { type: array, items: { type: integer }, maxItems: 20 }
+      responses:
+        '201':
+          description: Created
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string }
+              description: '`true` when this is a replay of an earlier attempt rather than new work.'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Incident' }
+        '400': { description: '`Idempotency-Key` is required on this endpoint' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: An earlier attempt with this key is still running }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /incidents/{incident}:
+    parameters:
+      - { name: incident, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Incidents]
+      summary: Retrieve one incident
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Incident' }
+          description: OK
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Incidents]
+      summary: Edit the descriptive fields
+      description: |
+        Severity and status are deliberately absent. Both are transitions with
+        notification and metric consequences, and allowing them here would route
+        them around the state machine.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string }
+                description: { type: [string, 'null'] }
+                impact: { type: [string, 'null'] }
+                service_id: { type: [integer, 'null'] }
+      responses:
+        '200': { description: Updated }
+        '422': { description: The incident is closed, or validation failed }
+    delete:
+      tags: [Incidents]
+      summary: Soft-delete
+      description: The timeline, audit trail and postmortem all survive.
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /incidents/{incident}/status:
+    parameters:
+      - { name: incident, in: path, required: true, schema: { type: integer } }
+    post:
+      tags: [Incidents]
+      summary: Move the incident through its lifecycle
+      description: |
+        Validated against the state machine. The response's
+        `status.allowed_transitions` tells the client which moves are legal next,
+        so it never has to learn the rules by trial and error.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/Status' }
+                note: { type: string, maxLength: 5000 }
+                public: { type: boolean, description: Mark the note safe for a customer status page }
+      responses:
+        '200': { description: Transitioned }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: |
+            `incident.illegal_transition` (with `details.allowed`),
+            `incident.terminal_status`, or `incident.status_unchanged`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /incidents/{incident}/events:
+    parameters:
+      - { name: incident, in: path, required: true, schema: { type: integer } }
+    get:
+      tags: [Timeline]
+      summary: The append-only timeline
+      description: |
+        Read-only. There is no write verb because the timeline is produced
+        exclusively by the domain service as a consequence of real state
+        changes — an endpoint that let a client append an arbitrary event would
+        make the timeline a claim rather than a record.
+
+        Cursor-paginated, because a timeline grows while you are reading it and
+        LIMIT/OFFSET would repeat and skip rows across page boundaries.
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: per_page, in: query, schema: { type: integer, maximum: 200 } }
+        - { name: after_id, in: query, schema: { type: string }, description: Fetch only what was missed after a stream gap }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/IncidentEvent' } }
+          description: OK
+
+  /incidents/export:
+    get:
+      tags: [Incidents]
+      summary: Stream the filtered incident list as CSV
+      description: |
+        Streamed in chunks, so peak memory is bounded regardless of result size.
+        Cells beginning `=`, `+`, `-`, `@`, tab or carriage return are prefixed
+        with an apostrophe: that input is inert here and executed by Excel.
+        Writes an `incident.exported` audit entry. Limited to 10 per hour.
+      responses:
+        '200':
+          description: CSV
+          content:
+            text/csv:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /metrics/summary:
+    get:
+      tags: [Metrics]
+      summary: MTTA, MTTR and SLA attainment
+      description: |
+        Percentiles accompany every average deliberately. A twelve-minute mean
+        with a two-hour p95 describes a very different on-call experience from a
+        twelve-minute mean with a fifteen-minute p95.
+      parameters:
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 366 } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        '200': { description: OK }
+        '422': { description: The window exceeds the cap }
+
+  /metrics/trends:
+    get:
+      tags: [Metrics]
+      summary: Daily opened, resolved and MTTR
+      description: Every day in the range is present, including quiet ones — skipping them would imply continuous activity.
+      parameters:
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 366 } }
+      responses:
+        '200': { description: OK }
+
+  /realtime/ticket:
+    post:
+      tags: [Realtime]
+      summary: Mint a 60-second stream credential
+      description: |
+        `EventSource` cannot set headers, so a browser must put its credential in
+        a query string — where it lands in access logs and browser history.
+        Handing over the 15-minute API token for that would be careless, so this
+        issues a short-lived token with `aud: incidentflow-realtime` that grants
+        nothing but a read stream. An API access token is not accepted by the
+        stream endpoint, and this ticket is not accepted by the API.
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      ticket: { type: string }
+                      expires_in: { type: integer, const: 60 }
+                      stream_url: { type: string }
+                      topics: { type: array, items: { type: string } }
+          description: OK
+
+  /audit-logs:
+    get:
+      tags: [Administration]
+      summary: The permanent audit trail
+      description: |
+        Read-only and administrator-only. Entries cannot be edited or deleted by
+        anyone — an audit log an administrator can rewrite proves nothing about
+        administrators.
+      parameters:
+        - { name: action, in: query, schema: { type: string } }
+        - { name: actor_id, in: query, schema: { type: integer } }
+        - { name: request_id, in: query, schema: { type: string } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200': { description: OK }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        RS256, 15-minute lifetime, `aud: incidentflow-api`. Carries identity
+        only — no roles. Authorization is resolved from the database on every
+        request so that revoking a role takes effect immediately rather than
+        whenever the token happens to expire.
+
+  parameters:
+    IdempotencyKeyRequired:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 255 }
+      description: |
+        A UUID your client generates per logical attempt and reuses on retry.
+        Replaying it returns the original response; reusing it with a different
+        body is a 422 rather than a silent success.
+
+  responses:
+    Unauthenticated:
+      description: Missing or unusable credential
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated, but not permitted
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: |
+        Does not exist, or belongs to another tenant — the two are deliberately
+        indistinguishable, since confirming an id exists elsewhere is a leak.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationFailed:
+      description: '`details.fields` maps each field to its messages.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Severity:
+      type: string
+      enum: [sev1, sev2, sev3, sev4]
+      description: SEV-1 and SEV-2 page immediately and require a postmortem.
+
+    Status:
+      type: string
+      enum: [open, acknowledged, mitigated, resolved, closed]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable and machine-readable. Switch on this, never on `message`.
+            message: { type: string }
+            details: { type: [object, 'null'] }
+            request_id:
+              type: [string, 'null']
+              description: Correlates this failure across every service. Quote it when reporting.
+
+    PaginationMeta:
+      type: object
+      properties:
+        current_page: { type: integer }
+        last_page: { type: integer }
+        per_page: { type: integer }
+        total: { type: integer }
+
+    SessionResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            user: { $ref: '#/components/schemas/User' }
+            access_token: { type: string }
+            token_type: { type: string, const: Bearer }
+            expires_in: { type: integer, description: Seconds. The refresh token travels separately, in an HttpOnly cookie. }
+
+    User:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        email: { type: string, format: email }
+        is_active: { type: boolean }
+
+    Incident:
+      type: object
+      properties:
+        id: { type: integer }
+        reference: { type: string, examples: ['INC-0042'], description: Sequential per tenant, so no customer can infer another's volume. }
+        title: { type: string }
+        description: { type: [string, 'null'] }
+        severity:
+          type: object
+          properties:
+            value: { $ref: '#/components/schemas/Severity' }
+            label: { type: string }
+            requires_postmortem: { type: boolean }
+            acknowledgement_target_minutes: { type: integer }
+        status:
+          type: object
+          properties:
+            value: { $ref: '#/components/schemas/Status' }
+            label: { type: string }
+            is_active: { type: boolean }
+            allowed_transitions:
+              type: array
+              items: { $ref: '#/components/schemas/Status' }
+              description: Computed server-side from the state machine, so the client can render exactly the moves that will succeed.
+        timestamps:
+          type: object
+          properties:
+            created_at: { type: [string, 'null'], format: date-time }
+            acknowledged_at: { type: [string, 'null'], format: date-time }
+            resolved_at: { type: [string, 'null'], format: date-time }
+            closed_at: { type: [string, 'null'], format: date-time }
+        durations:
+          type: object
+          properties:
+            time_to_acknowledge_seconds: { type: [integer, 'null'] }
+            time_to_resolve_seconds: { type: [integer, 'null'] }
+            open_for_seconds: { type: [integer, 'null'], description: Present only while the incident is still active. }
+
+    IncidentEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          description: |
+            A ULID — the same identifier the SSE stream uses as its event id,
+            which is what lets a client deduplicate a live event against one it
+            already fetched, and makes `Last-Event-ID` resume meaningful.
+        type: { type: string, examples: ['incident.status_changed'] }
+        summary: { type: string, description: Rendered sentence, so clients need not reimplement the phrasing. }
+        actor:
+          type: object
+          properties:
+            id: { type: [integer, 'null'] }
+            name: { type: string, description: Snapshotted, so the timeline still reads correctly after an account is deleted. }
+        payload: { type: object }
+        occurred_at: { type: string, format: date-time }
+        request_id: { type: [string, 'null'] }

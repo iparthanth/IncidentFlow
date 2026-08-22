@@ -1,0 +1,255 @@
+@import 'tailwindcss';
+
+/**
+ * Design system.
+ *
+ * One rule drives every colour decision here: **red means severity**. In an
+ * incident tool red is load-bearing — it is how a responder finds the SEV-1 in
+ * a list of forty. So the brand itself is deliberately *not* red. It is indigo,
+ * which leaves the whole warm end of the spectrum free to carry meaning.
+ *
+ * Everything is a token because these values appear in a dozen components, and
+ * a tool where SEV-1 is a slightly different red in two places reads as
+ * untrustworthy at exactly the moment trust matters most.
+ */
+@theme {
+  /* --- Brand ------------------------------------------------------------- */
+  --color-brand-50: oklch(0.97 0.014 265);
+  --color-brand-100: oklch(0.93 0.032 265);
+  --color-brand-200: oklch(0.87 0.06 265);
+  --color-brand-300: oklch(0.78 0.1 265);
+  --color-brand-400: oklch(0.68 0.15 265);
+  --color-brand-500: oklch(0.58 0.19 265);
+  --color-brand-600: oklch(0.5 0.2 265);
+  --color-brand-700: oklch(0.43 0.18 265);
+  --color-brand-800: oklch(0.36 0.14 265);
+  --color-brand-900: oklch(0.29 0.1 265);
+  --color-brand-950: oklch(0.2 0.07 265);
+
+  /* --- Severity: reserved, never decorative ------------------------------ */
+  --color-sev1: oklch(0.55 0.22 25);
+  --color-sev2: oklch(0.68 0.19 55);
+  --color-sev3: oklch(0.78 0.15 90);
+  --color-sev4: oklch(0.62 0.05 250);
+
+  /* --- Incident status ---------------------------------------------------- */
+  --color-status-open: oklch(0.6 0.2 25);
+  --color-status-acknowledged: oklch(0.68 0.17 65);
+  --color-status-mitigated: oklch(0.7 0.14 200);
+  --color-status-resolved: oklch(0.65 0.16 150);
+  --color-status-closed: oklch(0.55 0.02 250);
+
+  /*
+   * A system font stack, not a webfont. The CSP blocks external origins on
+   * purpose: an incident dashboard has to render when the internet is the
+   * thing that is broken. These are the faces already on the machine.
+   */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono:
+    ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  /* Softer, wider shadows than the defaults — closer to a real product UI. */
+  --shadow-card: 0 1px 2px oklch(0.2 0.03 265 / 0.06), 0 1px 3px oklch(0.2 0.03 265 / 0.04);
+  --shadow-raised: 0 2px 4px oklch(0.2 0.03 265 / 0.06), 0 8px 24px oklch(0.2 0.03 265 / 0.08);
+  --shadow-overlay: 0 8px 16px oklch(0.2 0.03 265 / 0.1), 0 24px 48px oklch(0.2 0.03 265 / 0.14);
+}
+
+@layer base {
+  /* Respect the reader's setting rather than imposing a theme. */
+  html {
+    color-scheme: light dark;
+  }
+
+  body {
+    text-rendering: optimizeLegibility;
+  }
+
+  /*
+   * Headings get tighter tracking as they grow. Large type set at default
+   * letter-spacing is the most common giveaway of an untuned interface.
+   */
+  h1 {
+    @apply text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-50;
+  }
+  h2 {
+    @apply text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100;
+  }
+  h3 {
+    @apply text-sm font-semibold text-slate-900 dark:text-slate-100;
+  }
+
+  /*
+   * Tabular numerals wherever a number changes in place. A duration counting
+   * up in proportional figures makes the entire row jitter once a second.
+   */
+  time,
+  [data-numeric] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /*
+   * A visible focus ring on every interactive element. Keyboard operation is
+   * not a nicety here: during an incident people work fast, and a responder
+   * tabbing to "Acknowledge" must be able to see where they are.
+   */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /*
+   * Honour prefers-reduced-motion. The live feed animates on every incoming
+   * event; for someone with vestibular sensitivity that is not a flourish, it
+   * is a reason to close the tab.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Skip link: hidden until focused, then pinned to the top-left. */
+  .skip-link {
+    @apply sr-only;
+  }
+
+  .skip-link:focus {
+    @apply not-sr-only fixed top-4 left-4 z-50 rounded-lg bg-slate-900 px-4 py-2 text-white shadow-lg;
+  }
+
+  /* --- Surfaces ----------------------------------------------------------- */
+
+  /*
+   * Cards use a ring rather than a border. A 1px ring sits *outside* the box
+   * model, so cards in a grid stay optically aligned regardless of padding.
+   */
+  .card {
+    @apply rounded-xl bg-white ring-1 ring-slate-200 dark:bg-slate-900 dark:ring-slate-800;
+    box-shadow: var(--shadow-card);
+  }
+
+  .card-pad {
+    @apply p-5;
+  }
+
+  .card-header {
+    @apply flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3.5 dark:border-slate-800;
+  }
+
+  /* --- Buttons ------------------------------------------------------------ */
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium whitespace-nowrap
+      transition-colors duration-150 select-none
+      disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply bg-brand-600 text-white shadow-sm hover:bg-brand-700 active:bg-brand-800
+      dark:bg-brand-500 dark:hover:bg-brand-400;
+  }
+
+  .btn-secondary {
+    @apply bg-white text-slate-700 ring-1 ring-slate-300 ring-inset hover:bg-slate-50
+      dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-700 dark:hover:bg-slate-700;
+  }
+
+  .btn-ghost {
+    @apply text-slate-600 hover:bg-slate-100 hover:text-slate-900
+      dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100;
+  }
+
+  /* Reserved for genuinely destructive actions — not for anything merely urgent. */
+  .btn-danger {
+    @apply bg-red-600 text-white shadow-sm hover:bg-red-700 active:bg-red-800;
+  }
+
+  .btn-sm {
+    @apply gap-1.5 rounded-md px-2.5 py-1.5 text-xs;
+  }
+
+  /* --- Forms -------------------------------------------------------------- */
+
+  .label {
+    @apply block text-sm font-medium text-slate-700 dark:text-slate-300;
+  }
+
+  .input {
+    @apply block w-full rounded-lg bg-white px-3 py-2 text-sm text-slate-900 shadow-sm
+      ring-1 ring-slate-300 ring-inset transition-shadow
+      placeholder:text-slate-400
+      focus:ring-2 focus:ring-brand-500 focus:outline-none
+      disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500
+      dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-700 dark:placeholder:text-slate-500
+      dark:disabled:bg-slate-900;
+  }
+
+  .field-hint {
+    @apply mt-1.5 text-xs text-slate-500 dark:text-slate-400;
+  }
+
+  .field-error {
+    @apply mt-1.5 text-xs font-medium text-red-600 dark:text-red-400;
+  }
+
+  /* --- Data display -------------------------------------------------------- */
+
+  .table-head {
+    @apply px-4 py-2.5 text-left text-xs font-semibold tracking-wide text-slate-500 uppercase
+      dark:text-slate-400;
+  }
+
+  .table-cell {
+    @apply px-4 py-3 text-sm text-slate-700 dark:text-slate-300;
+  }
+
+  .table-row {
+    @apply border-t border-slate-100 transition-colors hover:bg-slate-50/80
+      dark:border-slate-800 dark:hover:bg-slate-800/50;
+  }
+
+  /* Page-level heading block, so every screen opens the same way. */
+  .page-title {
+    @apply text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-50;
+  }
+
+  .page-subtitle {
+    @apply mt-1 text-sm text-slate-500 dark:text-slate-400;
+  }
+
+  /* --- Alerts -------------------------------------------------------------- */
+
+  .alert {
+    @apply flex items-start gap-2.5 rounded-lg px-3.5 py-3 text-sm;
+  }
+
+  .alert-error {
+    @apply bg-red-50 text-red-800 ring-1 ring-red-200 ring-inset
+      dark:bg-red-950/50 dark:text-red-200 dark:ring-red-900/60;
+  }
+
+  .alert-warning {
+    @apply bg-amber-50 text-amber-900 ring-1 ring-amber-200 ring-inset
+      dark:bg-amber-950/50 dark:text-amber-200 dark:ring-amber-900/60;
+  }
+
+  .alert-info {
+    @apply bg-brand-50 text-brand-900 ring-1 ring-brand-200 ring-inset
+      dark:bg-brand-950/50 dark:text-brand-200 dark:ring-brand-900/60;
+  }
+
+  .alert-success {
+    @apply bg-emerald-50 text-emerald-900 ring-1 ring-emerald-200 ring-inset
+      dark:bg-emerald-950/50 dark:text-emerald-200 dark:ring-emerald-900/60;
+  }
+}

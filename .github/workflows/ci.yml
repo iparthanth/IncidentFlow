@@ -1,0 +1,310 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Only the newest run per branch matters; cancel superseded ones rather than
+# paying for builds of commits nobody will look at.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PHP_VERSION: "8.3"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  api:
+    name: API — lint & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      # The local suite runs on in-memory SQLite for speed; CI runs the same
+      # tests against the engine that actually ships. Portable-looking schema
+      # builder calls can still behave differently on PostgreSQL, and this is
+      # the job that finds out.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: incidentflow_test
+          POSTGRES_USER: incidentflow
+          POSTGRES_PASSWORD: incidentflow
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U incidentflow -d incidentflow_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    defaults:
+      run:
+        working-directory: api
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: pdo_pgsql, mbstring, openssl, bcmath, pcntl, posix, zip
+          coverage: xdebug
+          tools: composer:v2
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/composer/files
+          key: composer-${{ runner.os }}-${{ hashFiles('api/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          php artisan jwt:keys --force
+
+      - name: Check formatting
+        run: composer run lint
+
+      - name: Run tests on SQLite
+        run: php vendor/bin/phpunit --testdox
+
+      - name: Run tests on PostgreSQL
+        env:
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_DATABASE: incidentflow_test
+          DB_USERNAME: incidentflow
+          DB_PASSWORD: incidentflow
+          CACHE_STORE: redis
+          REDIS_HOST: 127.0.0.1
+        run: php vendor/bin/phpunit
+
+      - name: Verify migrations roll back cleanly
+        env:
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_DATABASE: incidentflow_test
+          DB_USERNAME: incidentflow
+          DB_PASSWORD: incidentflow
+        # A migration nobody can reverse is a deployment with no way back.
+        run: |
+          php artisan migrate --force
+          php artisan migrate:rollback --force --step=100
+          php artisan migrate --force
+
+      - name: Verify the seeder produces a coherent dataset
+        env:
+          DB_CONNECTION: pgsql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 5432
+          DB_DATABASE: incidentflow_test
+          DB_USERNAME: incidentflow
+          DB_PASSWORD: incidentflow
+        run: php artisan migrate:fresh --seed --force
+
+      - name: Fail on known vulnerable dependencies
+        run: composer audit --no-interaction
+
+  # ---------------------------------------------------------------------------
+  realtime:
+    name: Realtime — lint, typecheck & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: realtime
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: realtime/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+      - name: Fail on known vulnerable dependencies
+        run: npm audit --audit-level=high
+
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web — lint, typecheck, test & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+      - name: Fail on known vulnerable dependencies
+        run: npm audit --audit-level=high
+
+  # ---------------------------------------------------------------------------
+  images:
+    name: Build & scan images
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [api, realtime, web]
+
+    permissions:
+      contents: read
+      packages: write
+      # Required to upload Trivy's SARIF output to the security tab.
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, realtime, web]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        # Pull requests from forks have no write access to packages, and asking
+        # for it would fail the job for an outside contributor.
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          target: runtime
+          # Only publish from main; a PR build is verified, never released.
+          push: ${{ github.event_name == 'push' }}
+          load: ${{ github.event_name != 'push' }}
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ matrix.service }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/${{ matrix.service }}:latest
+          build-args: |
+            APP_VERSION=${{ github.sha }}
+            VITE_APP_VERSION=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          # Attestations record how the image was built and what is in it, so a
+          # future CVE can be traced to an exact artifact without guesswork.
+          provenance: ${{ github.event_name == 'push' }}
+          sbom: ${{ github.event_name == 'push' }}
+
+      - name: Scan for vulnerabilities
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}:${{ github.sha }}
+          format: sarif
+          output: trivy-${{ matrix.service }}.sarif
+          severity: CRITICAL,HIGH
+          # Findings with no fix available cannot be acted on today; surfacing
+          # them as build failures trains people to ignore the scanner.
+          ignore-unfixed: true
+
+      - name: Upload scan results
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.service }}.sarif
+          category: trivy-${{ matrix.service }}
+
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [api, realtime, web]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Start the full stack
+        env:
+          APP_KEY: base64:2fl4Ry1yQZ1Yl3Vwq1qUq3sQ0R6bK9pZ8cJ7nT5mX2A=
+        run: |
+          docker compose up -d --build --wait --wait-timeout 300
+          docker compose ps
+
+      - name: Install browser drivers
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Run end-to-end tests
+        working-directory: web
+        env:
+          E2E_BASE_URL: http://localhost:8080
+        run: npm run e2e
+
+      - name: Capture logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: web/test-results/
+          retention-days: 7
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
