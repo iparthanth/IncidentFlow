@@ -14,6 +14,8 @@ use App\Models\Notification;
 use App\Models\OrganizationMember;
 use App\Models\User;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Decides who hears about an incident, and records that decision durably
@@ -114,7 +116,31 @@ final class NotificationDispatcher
                 continue;
             }
 
-            SendIncidentNotification::dispatch($notification->getKey());
+            try {
+                SendIncidentNotification::dispatch($notification->getKey());
+            } catch (Throwable $e) {
+                /*
+                 * The queue broker is unreachable. This must not propagate.
+                 *
+                 * By the time we get here the incident and its notification rows
+                 * are already committed — dispatch() runs after the transaction
+                 * on purpose. Letting this throw would return 500 for a write
+                 * that actually succeeded, telling a reporter their SEV-1 was
+                 * not filed when it was, and sending them to retry a thing that
+                 * already happened.
+                 *
+                 * The row stays `pending`, which is exactly the state
+                 * `notifications:retry-stale` sweeps. That safety net was
+                 * already written for this case; it was simply unreachable,
+                 * because the failure it catches killed the request first.
+                 */
+                Log::error('notification.enqueue_failed', [
+                    'notification_id' => $notification->getKey(),
+                    'incident_id' => $notification->incident_id,
+                    'channel' => $notification->channel->value,
+                    'exception' => $e->getMessage(),
+                ]);
+            }
         }
     }
 

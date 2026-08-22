@@ -21,6 +21,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Tests\TestCase;
 
@@ -36,6 +37,67 @@ use Tests\TestCase;
 final class NotificationDeliveryTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_an_unreachable_queue_does_not_fail_an_incident_that_already_committed(): void
+    {
+        /*
+         * Reproduces the CI failure: Predis cannot reach the broker.
+         *
+         * dispatch() runs *after* the incident transaction commits, so by the
+         * time the broker is found to be down the incident is already durable.
+         * Throwing here would return 500 for a write that succeeded — telling a
+         * reporter their SEV-1 was not filed when it was.
+         *
+         * Port 1 refuses the connection immediately, which makes this
+         * deterministic rather than a timeout.
+         */
+        config([
+            'queue.default' => 'redis',
+            'queue.connections.redis' => [
+                'driver' => 'redis',
+                'connection' => 'default',
+                'queue' => 'default',
+                'retry_after' => 90,
+                'block_for' => null,
+            ],
+            'database.redis.client' => 'predis',
+            'database.redis.default' => [
+                'host' => '127.0.0.1',
+                'port' => 1,
+                'database' => 0,
+                'timeout' => 0.05,
+                'read_write_timeout' => 0.05,
+            ],
+        ]);
+
+        [$organization, $user] = $this->tenantWithMember(OrganizationRole::Reporter);
+
+        // Somebody who can actually be paged. A reporter is never on the rota,
+        // so without this there is no email notification to keep pending.
+        User::factory()->memberOf($organization, OrganizationRole::Responder)->create();
+
+        $response = $this->actingAsMember($user, $organization)
+            ->withHeader('Idempotency-Key', (string) Str::uuid())
+            ->postJson('/api/v1/incidents', [
+                'title' => 'Payment gateway returning 503 for every card',
+                'severity' => IncidentSeverity::Sev1->value,
+            ]);
+
+        $response->assertCreated();
+        $this->assertSame(1, Incident::query()->count());
+
+        // The row survives as `pending` — precisely the state that
+        // `notifications:retry-stale` sweeps once the broker returns. Without
+        // that, a broker blip silently swallows a SEV-1 page.
+        $this->assertGreaterThan(
+            0,
+            Notification::query()
+                ->where('channel', NotificationChannel::Email->value)
+                ->where('status', NotificationStatus::Pending->value)
+                ->count(),
+            'The notification must remain pending so the stale sweep can retry it.',
+        );
+    }
 
     public function test_a_high_severity_incident_writes_notification_rows_before_anything_is_sent(): void
     {

@@ -90,6 +90,27 @@ final class JwtKeyPathTest extends TestCase
         $this->assertStringContainsString('PUBLIC KEY', $provider->publicKey());
     }
 
+    public function test_the_committed_env_example_does_not_hardcode_compose_hostnames(): void
+    {
+        $example = (string) file_get_contents(base_path('.env.example'));
+
+        /*
+         * docker-compose.yml sets DB_HOST/REDIS_HOST/MAIL_HOST itself for every
+         * api-family service, so a Compose service name here is redundant inside
+         * Docker and simply wrong everywhere else. On a CI runner it resolves to
+         * nothing -- "getaddrinfo for redis failed" -- and the run dies.
+         */
+        foreach (['DB_HOST' => 'postgres', 'REDIS_HOST' => 'redis', 'MAIL_HOST' => 'mailpit'] as $key => $service) {
+            $this->assertStringNotContainsString(
+                "{$key}={$service}",
+                $example,
+                "{$key} must not be the Compose service name; Compose supplies its own value and this file is also used outside Docker.",
+            );
+        }
+
+        $this->assertStringContainsString('REDIS_HOST=127.0.0.1', $example);
+    }
+
     public function test_the_committed_env_example_does_not_hardcode_a_container_path(): void
     {
         $example = (string) file_get_contents(base_path('.env.example'));
