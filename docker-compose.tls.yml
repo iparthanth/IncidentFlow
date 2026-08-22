@@ -1,0 +1,39 @@
+# ---------------------------------------------------------------------------
+# TLS overlay for single-host deployments (a VPS, not a managed platform).
+#
+#   docker compose -f docker-compose.yml \
+#                  -f docker-compose.prod.yml \
+#                  -f docker-compose.tls.yml up -d
+#
+# Kept separate from the production overlay on purpose: when a cloud load
+# balancer or a platform edge already terminates TLS, adding a second
+# terminator here would be redundant at best. On a VPS nothing else is
+# listening, so this supplies it.
+# ---------------------------------------------------------------------------
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN must be set — Caddy needs it to request a certificate}
+      TLS_EMAIL: ${TLS_EMAIL:?TLS_EMAIL must be set — Let's Encrypt uses it for expiry warnings}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates live here. Losing this volume means re-requesting every
+      # certificate, and Let's Encrypt rate-limits that per domain per week.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - nginx
+
+  # Caddy is now the only thing the internet can reach.
+  nginx:
+    ports: !override []
+
+volumes:
+  caddy-data:
+  caddy-config:

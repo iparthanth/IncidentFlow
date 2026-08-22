@@ -1,0 +1,29 @@
+# TLS terminator for a single-host deployment.
+#
+# The production overlay assumes "TLS terminates at the edge" and publishes
+# plain HTTP on :80 — correct when a cloud load balancer sits in front, wrong on
+# a bare VPS where nothing else is listening. This is that edge.
+#
+# It is not optional. The overlay sets JWT_REFRESH_COOKIE_SECURE=true, so over
+# plain HTTP the browser accepts the refresh cookie and then never sends it
+# back: sign-in appears to succeed and the session dies at the first refresh,
+# fifteen minutes later, with nothing in the API logs to explain it.
+
+{
+	email {$TLS_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	reverse_proxy nginx:80 {
+		# -1 disables response buffering entirely. Caddy otherwise batches the
+		# upstream's output, which is invisible for JSON and fatal for SSE: the
+		# realtime stream would arrive in chunks whenever a buffer happened to
+		# fill instead of when events actually occurred.
+		flush_interval -1
+
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+	}
+}
