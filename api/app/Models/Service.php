@@ -29,6 +29,7 @@ class Service extends Model
 
     /** @use HasFactory<ServiceFactory> */
     use HasFactory;
+
     use SoftDeletes;
 
     protected $fillable = [

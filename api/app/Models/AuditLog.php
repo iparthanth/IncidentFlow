@@ -32,6 +32,7 @@ class AuditLog extends Model
 
     /** @use HasFactory<AuditLogFactory> */
     use HasFactory;
+
     use HasUlids;
 
     public const UPDATED_AT = null;

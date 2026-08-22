@@ -37,6 +37,7 @@ class Incident extends Model
 
     /** @use HasFactory<IncidentFactory> */
     use HasFactory;
+
     use SoftDeletes;
 
     /** Columns a client may sort by. Anything else is rejected, not silently ignored. */

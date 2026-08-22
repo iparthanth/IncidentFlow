@@ -39,6 +39,7 @@ class IncidentEvent extends Model
 
     /** @use HasFactory<IncidentEventFactory> */
     use HasFactory;
+
     use HasUlids;
 
     /** No updated_at column exists; Laravel treats null as "do not track". */

@@ -27,6 +27,7 @@ class Postmortem extends Model
 
     /** @use HasFactory<PostmortemFactory> */
     use HasFactory;
+
     use SoftDeletes;
 
     protected $fillable = [
