@@ -1,0 +1,50 @@
+# Build context exclusions.
+#
+# Without this file the context is "whatever happens to be in the working tree",
+# which makes the image depend on the machine that built it. Two concrete
+# failures this prevents:
+#
+#   1. bootstrap/cache/*.php is a *generated* package manifest. If it was
+#      produced on a machine with dev dependencies installed it names
+#      Laravel\Pail\PailServiceProvider, and the image -- which installs
+#      --no-dev -- then fails `package:discover` with "class not found".
+#   2. .env would be copied into an image layer. Layers are extractable by
+#      anyone who can pull the image, so a secret committed this way is public
+#      even if a later step deletes the file.
+
+# Secrets, always first.
+.env
+.env.*
+!.env.example
+!.env.local.example
+storage/keys/
+*.pem
+*.key
+
+# Installed by the vendor stage inside the image; copying the host's copy is
+# both slower and a source of platform-specific binaries.
+vendor/
+node_modules/
+
+# Generated caches. See note 1 above.
+bootstrap/cache/*.php
+
+# Runtime state, never build input.
+storage/logs/
+storage/framework/cache/
+storage/framework/sessions/
+storage/framework/views/
+storage/app/
+*.sqlite
+*.sqlite-journal
+
+# Test and tooling artefacts.
+.phpunit.result.cache
+.phpunit.cache/
+coverage/
+
+# Version control and editor noise.
+.git/
+.gitignore
+.idea/
+.vscode/

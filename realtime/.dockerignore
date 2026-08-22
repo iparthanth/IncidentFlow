@@ -1,0 +1,21 @@
+# See api/.dockerignore for the rationale. In short: without this file the
+# image depends on whatever is in the working tree, and .env becomes eligible
+# for copying into an extractable image layer.
+
+.env
+.env.*
+!.env.example
+
+# Reinstalled inside the image; host copies carry platform-specific binaries.
+node_modules/
+
+# Compiled by the build stage.
+dist/
+
+coverage/
+*.log
+
+.git/
+.gitignore
+.idea/
+.vscode/

@@ -108,6 +108,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        # The schema has to exist before these serve or process anything. This
+        # also makes `--wait` tolerate a run-once container: without an explicit
+        # completion condition Compose treats an exited service as a failure and
+        # `up --wait` returns 1 even when every other service is healthy.
+        condition: service_completed_successfully
 
   # Runs migrations exactly once, then exits. Keeping this out of the API
   # container's entrypoint is what stops three replicas racing each other
@@ -135,6 +141,18 @@ services:
       target: runtime
     environment: *api-environment
     command: ["php", "artisan", "horizon"]
+    healthcheck:
+      # The image's probe checks php-fpm on :9000, which this service does not
+      # run -- it runs `php artisan horizon`. Inherited unchanged it can never
+      # pass, so the container sits permanently "unhealthy" while processing
+      # jobs perfectly well, and `up --wait` fails on an otherwise sound stack.
+      #
+      # Disabled rather than replaced: the worker is PID 1 here, so if it dies
+      # the container dies with it -- "running" already is the health signal.
+      # `horizon:status` is not an alternative: it reads cluster state from
+      # Redis and returns 0 from any container, including ones not running
+      # Horizon at all.
+      disable: true
     volumes:
       - ./api:/var/www/html
       - api-vendor:/var/www/html/vendor
@@ -144,6 +162,12 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      migrate:
+        # The schema has to exist before these serve or process anything. This
+        # also makes `--wait` tolerate a run-once container: without an explicit
+        # completion condition Compose treats an exited service as a failure and
+        # `up --wait` returns 1 even when every other service is healthy.
+        condition: service_completed_successfully
     # Horizon must be allowed to finish the job it is holding before it dies.
     stop_grace_period: 30s
 
@@ -156,6 +180,11 @@ services:
     # keeps the whole schedule in routes/console.php rather than split between
     # the repository and the host.
     command: ["php", "artisan", "schedule:work"]
+    healthcheck:
+      # Same reasoning as horizon: this runs `schedule:work`, not php-fpm, so
+      # the inherited probe can never pass. The scheduler loop is PID 1, so the
+      # container exiting is the real failure signal.
+      disable: true
     volumes:
       - ./api:/var/www/html
       - api-vendor:/var/www/html/vendor
@@ -163,6 +192,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      migrate:
+        # The schema has to exist before these serve or process anything. This
+        # also makes `--wait` tolerate a run-once container: without an explicit
+        # completion condition Compose treats an exited service as a failure and
+        # `up --wait` returns 1 even when every other service is healthy.
+        condition: service_completed_successfully
 
   realtime:
     build:

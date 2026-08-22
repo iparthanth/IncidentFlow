@@ -1,0 +1,24 @@
+# See api/.dockerignore for the rationale.
+
+.env
+.env.*
+!.env.example
+
+# Reinstalled inside the image; host copies carry platform-specific binaries.
+node_modules/
+
+# Produced by the build stage.
+dist/
+
+# Test artefacts, and browser binaries that must never enter an image.
+coverage/
+playwright-report/
+test-results/
+blob-report/
+playwright-browsers/
+*.tsbuildinfo
+
+.git/
+.gitignore
+.idea/
+.vscode/

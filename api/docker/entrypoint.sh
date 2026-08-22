@@ -44,26 +44,41 @@ fi
 # invalidates every token the first has already signed — which surfaces later
 # as inexplicable "invalid signature" errors in the realtime tier.
 #
-# The lock is never released: it is a one-shot marker, and the enclosing check
-# means a volume that already has keys never reaches this code at all.
+# The lock MUST be recoverable. A held lock and an abandoned one look identical
+# from the outside, so a waiter that only ever waits will hang forever on a
+# volume whose winner died mid-generation — lock present, keys absent, every
+# later container timing out. That state is unrecoverable without deleting the
+# volume by hand, which is strictly worse than the race being prevented here.
+# So the holder always releases, and a waiter that times out breaks the lock and
+# generates the pair itself.
 JWT_KEY_FILE="${JWT_PRIVATE_KEY_PATH:-/var/www/html/storage/keys/jwt-private.pem}"
 JWT_KEY_LOCK="$(dirname "$JWT_KEY_FILE")/.keygen.lock"
 
+release_keygen_lock() {
+    rmdir "$JWT_KEY_LOCK" 2>/dev/null || true
+}
+
 if [ ! -f "$JWT_KEY_FILE" ]; then
   if mkdir "$JWT_KEY_LOCK" 2>/dev/null; then
+    # Released on any exit, including a crash inside jwt:keys. Without the trap
+    # `set -e` would abort the script with the lock still held.
+    trap release_keygen_lock EXIT
     echo "{\"level\":\"info\",\"message\":\"generating JWT key pair\"}"
     php artisan jwt:keys --force
+    release_keygen_lock
+    trap - EXIT
   else
     echo "{\"level\":\"info\",\"message\":\"another container is generating the JWT key pair; waiting\"}"
     waited=0
-    while [ ! -f "$JWT_KEY_FILE" ] && [ "$waited" -lt 60 ]; do
+    while [ ! -f "$JWT_KEY_FILE" ] && [ "$waited" -lt 30 ]; do
       sleep 1
       waited=$((waited + 1))
     done
 
     if [ ! -f "$JWT_KEY_FILE" ]; then
-      echo "{\"level\":\"fatal\",\"message\":\"JWT key pair did not appear within 60 seconds\"}" >&2
-      exit 1
+      echo "{\"level\":\"warning\",\"message\":\"keygen lock looks abandoned; generating the pair here instead\"}"
+      release_keygen_lock
+      php artisan jwt:keys --force
     fi
   fi
 fi
