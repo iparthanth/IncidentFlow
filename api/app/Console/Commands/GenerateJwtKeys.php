@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Auth\KeyProvider;
 use Illuminate\Console\Command;
 
 /**
@@ -172,15 +173,22 @@ final class GenerateJwtKeys extends Command
         $override = $this->option('path');
 
         if (is_string($override) && $override !== '') {
+            $base = rtrim(KeyProvider::absolute($override), '/\\');
+
             return [
-                rtrim($override, '/\\').DIRECTORY_SEPARATOR.'jwt-private.pem',
-                rtrim($override, '/\\').DIRECTORY_SEPARATOR.'jwt-public.pem',
+                $base.DIRECTORY_SEPARATOR.'jwt-private.pem',
+                $base.DIRECTORY_SEPARATOR.'jwt-public.pem',
             ];
         }
 
+        // Resolved through KeyProvider so the pair is written to exactly the
+        // path the application will later read from. Using the raw config value
+        // anchors a relative path to the working directory — which is the
+        // project root under `artisan`, but not under php-fpm or a supervised
+        // worker. Writer and reader would then silently disagree.
         return [
-            (string) config('jwt.private_key_path'),
-            (string) config('jwt.public_key_path'),
+            KeyProvider::absolute((string) config('jwt.private_key_path')),
+            KeyProvider::absolute((string) config('jwt.public_key_path')),
         ];
     }
 }

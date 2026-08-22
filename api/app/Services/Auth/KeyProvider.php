@@ -54,7 +54,7 @@ final class KeyProvider
             );
         }
 
-        $path = $this->absolute($path);
+        $path = self::absolute($path);
 
         if (! is_readable($path)) {
             throw new RuntimeException(
@@ -73,8 +73,13 @@ final class KeyProvider
      * (which runs from `public/`), under php-fpm, or under a queue worker
      * started by a supervisor. Resolving here means one configured value works
      * in all of them instead of failing in whichever context nobody tested.
+     *
+     * Public and static because `jwt:keys` has to resolve paths *identically*
+     * when it writes the pair. When the writer used the working directory and
+     * the reader used the project root, the command reported success having put
+     * the keys somewhere the application would never look.
      */
-    private function absolute(string $path): string
+    public static function absolute(string $path): string
     {
         $isAbsolute = str_starts_with($path, '/')
             || str_starts_with($path, '\\')
