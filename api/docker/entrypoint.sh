@@ -34,9 +34,38 @@ fi
 # Generate the signing key pair if the mounted volume is empty. In a real
 # deployment the keys are injected as secrets and this is a no-op; it exists so
 # `docker compose up` works on a fresh clone with no manual step.
-if [ ! -f "${JWT_PRIVATE_KEY_PATH:-/var/www/html/storage/keys/jwt-private.pem}" ]; then
-  echo "{\"level\":\"info\",\"message\":\"generating JWT key pair\"}"
-  php artisan jwt:keys --force
+#
+# Single-writer, because this is not a single container. api, migrate, horizon
+# and scheduler share this volume and are all released together once Postgres
+# reports healthy, so all four reach this check within milliseconds of each
+# other. `mkdir` is atomic on POSIX: exactly one wins and generates the pair,
+# and the others wait for the result. Without it two containers both see the
+# file missing and run `jwt:keys --force`, and whichever finishes second
+# invalidates every token the first has already signed — which surfaces later
+# as inexplicable "invalid signature" errors in the realtime tier.
+#
+# The lock is never released: it is a one-shot marker, and the enclosing check
+# means a volume that already has keys never reaches this code at all.
+JWT_KEY_FILE="${JWT_PRIVATE_KEY_PATH:-/var/www/html/storage/keys/jwt-private.pem}"
+JWT_KEY_LOCK="$(dirname "$JWT_KEY_FILE")/.keygen.lock"
+
+if [ ! -f "$JWT_KEY_FILE" ]; then
+  if mkdir "$JWT_KEY_LOCK" 2>/dev/null; then
+    echo "{\"level\":\"info\",\"message\":\"generating JWT key pair\"}"
+    php artisan jwt:keys --force
+  else
+    echo "{\"level\":\"info\",\"message\":\"another container is generating the JWT key pair; waiting\"}"
+    waited=0
+    while [ ! -f "$JWT_KEY_FILE" ] && [ "$waited" -lt 60 ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+
+    if [ ! -f "$JWT_KEY_FILE" ]; then
+      echo "{\"level\":\"fatal\",\"message\":\"JWT key pair did not appear within 60 seconds\"}" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Cache configuration and routes. Skipped when APP_DEBUG is on so that a

@@ -186,7 +186,13 @@ services:
       redis:
         condition: service_healthy
       api:
-        condition: service_started
+        # service_healthy, not service_started. The API generates the RS256 pair
+        # in its entrypoint, after waiting for PostgreSQL, and this service reads
+        # the public half from the shared volume at boot. Releasing on "container
+        # started" let realtime read the path before the file existed, so it died
+        # with ENOENT. php-fpm only listens once the entrypoint has finished,
+        # which makes "healthy" an accurate proxy for "the keys exist".
+        condition: service_healthy
 
   web:
     build:
