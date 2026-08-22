@@ -74,3 +74,6 @@ npm-debug.log*
 
 # Playwright browser binaries, when relocated off the system drive
 playwright-browsers/
+
+# TypeScript incremental build state — machine-specific, regenerated on build.
+*.tsbuildinfo
