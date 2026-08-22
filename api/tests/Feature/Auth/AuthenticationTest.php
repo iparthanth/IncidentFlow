@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Services\Auth\TokenService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Tests\TestCase;
 
 final class AuthenticationTest extends TestCase
@@ -275,6 +276,17 @@ final class AuthenticationTest extends TestCase
          * accounts from one address; keyed on email alone anyone can lock a
          * named user out of their own account on demand.
          */
+        /*
+         * Reset the limiter before counting. Its buckets live in the cache, and
+         * the cache is per-test locally (CACHE_STORE=array in phpunit.xml) but
+         * shared for the whole run on CI (CACHE_STORE=redis). Nine auth
+         * requests happen in this file before this test, so on CI the per-IP
+         * budget of 10 was nearly spent and the first attempt here already came
+         * back 429 -- the assertion below then failed for a reason that had
+         * nothing to do with what it is testing.
+         */
+        Cache::flush();
+
         $limit = (int) config('incidents.rate_limits.auth_per_identity');
 
         $statuses = [];
@@ -291,6 +303,17 @@ final class AuthenticationTest extends TestCase
 
     public function test_a_throttled_response_says_when_to_retry(): void
     {
+        /*
+         * Reset the limiter before counting. Its buckets live in the cache, and
+         * the cache is per-test locally (CACHE_STORE=array in phpunit.xml) but
+         * shared for the whole run on CI (CACHE_STORE=redis). Nine auth
+         * requests happen in this file before this test, so on CI the per-IP
+         * budget of 10 was nearly spent and the first attempt here already came
+         * back 429 -- the assertion below then failed for a reason that had
+         * nothing to do with what it is testing.
+         */
+        Cache::flush();
+
         $limit = (int) config('incidents.rate_limits.auth_per_identity');
 
         $response = null;
