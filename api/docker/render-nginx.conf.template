@@ -1,0 +1,63 @@
+# nginx for single-container PaaS hosts (Render, Railway, Fly).
+#
+# The normal deployment puts nginx in its own container in front of PHP-FPM.
+# Render gives a service exactly one HTTP port, so here the two run side by
+# side under supervisord and nginx talks to PHP-FPM over loopback.
+#
+# ${PORT} is substituted at boot by envsubst — Render assigns the port and the
+# process must bind whatever it is told, not a hardcoded one.
+
+server {
+    listen ${PORT};
+    server_name _;
+    root /var/www/html/public;
+    index index.php;
+
+    client_max_body_size 12m;
+
+    # Render terminates TLS at its edge, so the app only ever sees http here.
+    # Without this Laravel builds http:// URLs and cookies marked `secure`
+    # are silently dropped by the browser.
+    set $forwarded_scheme $scheme;
+    if ($http_x_forwarded_proto = 'https') {
+        set $forwarded_scheme https;
+    }
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    # Server-Sent Events must not be buffered anywhere in the chain, or the
+    # client sits waiting on a response that nginx is holding.
+    location /api/v1/stream {
+        proxy_buffering off;
+        add_header X-Accel-Buffering no always;
+        try_files $uri /index.php?$query_string;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ ^/index\.php(/|$) {
+        fastcgi_pass 127.0.0.1:9000;
+        fastcgi_split_path_info ^(.+\.php)(/.*)$;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
+        fastcgi_param HTTPS $forwarded_scheme;
+        fastcgi_param REQUEST_SCHEME $forwarded_scheme;
+        fastcgi_read_timeout 3600s;
+        fastcgi_hide_header X-Powered-By;
+        internal;
+    }
+
+    # Nothing else may execute PHP — only the front controller above.
+    location ~ \.php$ {
+        return 404;
+    }
+
+    location ~ /\.(?!well-known) {
+        deny all;
+    }
+}

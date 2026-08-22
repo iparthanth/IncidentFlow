@@ -1,0 +1,180 @@
+# Render blueprint — the backend half of IncidentFlow.
+#
+# WHY THE BACKEND IS NOT ON VERCEL
+# Vercel runs the React app beautifully and cannot run any of this: there is no
+# PHP runtime for Laravel, serverless functions cannot hold the long-lived SSE
+# connections the realtime tier exists to serve, and Postgres/Redis are separate
+# products. So the frontend goes to Vercel and everything below goes here.
+#
+# HOW TO DEPLOY
+#   1. Render Dashboard -> New -> Blueprint -> connect this repository.
+#   2. Render will prompt for the values marked `sync: false` (see README-DEPLOY.md
+#      for how to generate each one).
+#   3. After the first successful deploy, run the migrations once (Shell tab on
+#      incidentflow-api):    php artisan migrate --force --seed
+#   4. Give the API URL to the frontend and redeploy Vercel.
+#
+# NOTE ON PLANS: `free` web services sleep after 15 minutes idle and take ~30s to
+# wake. That is survivable for a demo but makes the first request after a quiet
+# period look like a timeout. Background workers are not available on free at
+# all — see the comment on incidentflow-worker.
+
+databases:
+  - name: incidentflow-db
+    databaseName: incidentflow
+    user: incidentflow
+    plan: free
+
+services:
+  # ---------------------------------------------------------------------------
+  # Redis. Carries events from Laravel to the realtime tier, and backs the queue.
+  # ---------------------------------------------------------------------------
+  - type: keyvalue
+    name: incidentflow-redis
+    plan: free
+    ipAllowList: []
+    # Events are replayable from Postgres and queued jobs are retried, so
+    # evicting the coldest keys under memory pressure is preferable to refusing
+    # writes. Postgres remains the source of truth either way.
+    maxmemoryPolicy: allkeys-lru
+
+  # ---------------------------------------------------------------------------
+  # Laravel API. Uses the `render` Dockerfile stage: nginx + PHP-FPM in one
+  # container, because a Render service gets exactly one HTTP port.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: incidentflow-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./api/Dockerfile
+    dockerContext: ./api
+    dockerTarget: render
+    healthCheckPath: /api/v1/health/live
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: 'false'
+      - key: LOG_CHANNEL
+        value: stderr
+      - key: LOG_LEVEL
+        value: info
+
+      # php artisan key:generate --show
+      - key: APP_KEY
+        sync: false
+
+      # The public URL Render assigns this service, e.g.
+      # https://incidentflow-api.onrender.com
+      - key: APP_URL
+        sync: false
+
+      - key: DB_CONNECTION
+        value: pgsql
+      - key: DB_URL
+        fromDatabase:
+          name: incidentflow-db
+          property: connectionString
+
+      - key: REDIS_CLIENT
+        value: predis
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: incidentflow-redis
+          property: connectionString
+
+      - key: CACHE_STORE
+        value: redis
+      - key: QUEUE_CONNECTION
+        value: redis
+      - key: SESSION_DRIVER
+        value: redis
+
+      # The RS256 pair, injected rather than generated. The realtime service
+      # verifies with the public half; if the API minted a fresh pair on every
+      # restart, realtime auth would break on each deploy and look like a bug in
+      # the realtime tier. Generate once with `php artisan jwt:keys --show`.
+      - key: JWT_PRIVATE_KEY
+        sync: false
+      - key: JWT_PUBLIC_KEY
+        sync: false
+
+      - key: REALTIME_ENABLED
+        value: 'true'
+
+      # The Vercel origin. Needed so the refresh cookie is accepted and CORS
+      # allows the SPA. e.g. https://incident-flow.vercel.app
+      - key: FRONTEND_URL
+        sync: false
+      - key: SANCTUM_STATEFUL_DOMAINS
+        sync: false
+
+      # Cross-site because the SPA is on vercel.app and the API on onrender.com.
+      # With `strict` the browser would silently drop the refresh cookie and
+      # every session would end after 15 minutes with no visible error.
+      - key: JWT_REFRESH_COOKIE_SAMESITE
+        value: none
+      - key: JWT_REFRESH_COOKIE_SECURE
+        value: 'true'
+
+      - key: MAIL_MAILER
+        value: log
+
+  # ---------------------------------------------------------------------------
+  # Realtime tier. Holds SSE/WebSocket connections and fans out Redis events.
+  # Owns no database credentials — by design it cannot read or write business
+  # data, only relay what Laravel already committed.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: incidentflow-realtime
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./realtime/Dockerfile
+    dockerContext: ./realtime
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: incidentflow-redis
+          property: connectionString
+
+      # Verification only. This service can check a token but can never mint
+      # one — which is the entire reason the algorithm is RS256 and not HS256.
+      - key: JWT_PUBLIC_KEY
+        sync: false
+      - key: JWT_ISSUER
+        value: incidentflow-api
+      - key: JWT_AUDIENCE
+        value: incidentflow-realtime
+
+      # Comma-separated Vercel origin(s).
+      - key: CORS_ORIGINS
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # Queue worker (Horizon).
+  #
+  # Render has no free tier for background workers. Leave this commented out on
+  # free and the app still works — but queued email notifications are prepared
+  # and never sent, so nothing arrives in an inbox. Uncomment on a paid plan.
+  # ---------------------------------------------------------------------------
+  # - type: worker
+  #   name: incidentflow-worker
+  #   runtime: docker
+  #   plan: starter
+  #   region: singapore
+  #   dockerfilePath: ./api/Dockerfile
+  #   dockerContext: ./api
+  #   dockerTarget: render
+  #   dockerCommand: php artisan horizon
+  #   envVars:
+  #     - fromGroup: incidentflow-api

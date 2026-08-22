@@ -77,3 +77,7 @@ playwright-browsers/
 
 # TypeScript incremental build state — machine-specific, regenerated on build.
 *.tsbuildinfo
+
+# Locally generated production secrets. Never commit.
+deploy-secrets.local.txt
+*.local.txt

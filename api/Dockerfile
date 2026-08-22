@@ -93,3 +93,40 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint"]
 CMD ["php-fpm"]
+
+# ---------------------------------------------------------------------------
+# render — single-container variant for PaaS hosts (Render, Railway, Fly).
+#
+# The compose deployment runs nginx in its own container in front of PHP-FPM,
+# which is the right shape when you control the topology. A PaaS gives a service
+# exactly one HTTP port, so this stage puts both processes in one container
+# under supervisord. Same application, different packaging.
+# ---------------------------------------------------------------------------
+FROM runtime AS render
+
+USER root
+
+RUN apk add --no-cache nginx supervisor gettext \
+    && rm -rf /var/cache/apk/* \
+    && mkdir -p /etc/nginx/http.d /etc/nginx/templates /run/nginx /var/lib/nginx/tmp /var/log/nginx \
+    && rm -f /etc/nginx/http.d/default.conf
+
+COPY docker/render-nginx.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/render-supervisord.conf /etc/supervisord.conf
+COPY docker/render-entrypoint.sh /usr/local/bin/render-entrypoint
+
+RUN chmod +x /usr/local/bin/render-entrypoint \
+    && chown -R www-data:www-data /run/nginx /var/lib/nginx /var/log/nginx /etc/nginx/http.d
+
+USER www-data
+
+ENV PORT=8080
+EXPOSE 8080
+
+# Unlike the php-fpm image, here the app itself answers HTTP, so the probe can
+# use the real liveness endpoint.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=25s --retries=3 \
+    CMD php -r "exit(@file_get_contents('http://127.0.0.1:'.getenv('PORT').'/api/v1/health/live') ? 0 : 1);"
+
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/render-entrypoint"]
+CMD ["supervisord", "-c", "/etc/supervisord.conf"]
