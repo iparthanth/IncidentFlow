@@ -20,10 +20,17 @@ fi
 # for the database inside it to finish initialising.
 if [ -n "${DB_HOST:-}" ]; then
   attempt=0
-  until php -r "new PDO('pgsql:host='.getenv('DB_HOST').';port='.(getenv('DB_PORT') ?: 5432).';dbname='.getenv('DB_DATABASE'), getenv('DB_USERNAME'), getenv('DB_PASSWORD'));" 2>/dev/null; do
+  until db_error="$(php -r "new PDO('pgsql:host='.getenv('DB_HOST').';port='.(getenv('DB_PORT') ?: 5432).';dbname='.getenv('DB_DATABASE'), getenv('DB_USERNAME'), getenv('DB_PASSWORD'));" 2>&1)"; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 30 ]; then
-      echo "{\"level\":\"fatal\",\"message\":\"database unreachable after 30 attempts\"}" >&2
+      # Report what the driver actually said. "unreachable after 30 attempts" is
+      # a count, not a diagnosis: it does not distinguish an unresolvable
+      # hostname from a refused connection from a rejected password, and hiding
+      # the difference turned one CI failure into a full reproduction cycle
+      # before anyone learned which of the three it was.
+      detail="$(printf '%s' "$db_error" | tr '
+' ' ' | tr -d '"\' | cut -c1-300)"
+      echo "{\"level\":\"fatal\",\"message\":\"database unreachable after 30 attempts\",\"last_error\":\"${detail}\"}" >&2
       exit 1
     fi
     echo "{\"level\":\"info\",\"message\":\"waiting for database\",\"attempt\":${attempt}}"

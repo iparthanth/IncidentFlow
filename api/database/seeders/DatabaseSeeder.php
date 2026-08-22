@@ -40,6 +40,21 @@ final class DatabaseSeeder extends Seeder
             return;
         }
 
+        /*
+         * Seeding is a one-shot. docker-compose runs `migrate --force && db:seed
+         * --force` on every `up`, and api/horizon/scheduler now wait for that
+         * command to *succeed* -- so a second `up` against an existing volume
+         * aborted the entire stack on a duplicate-key violation before anything
+         * started. Demo data already being present is the normal state on a
+         * re-run, not a failure. `migrate:fresh --seed` still reseeds, because
+         * it drops the tables first and this check then finds nothing.
+         */
+        if (Organization::query()->exists()) {
+            $this->command?->info('Demo data is already present; nothing to seed.');
+
+            return;
+        }
+
         $organization = Organization::query()->create([
             'name' => 'Northwind Logistics',
             'slug' => 'northwind',

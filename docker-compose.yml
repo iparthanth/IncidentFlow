@@ -69,9 +69,16 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      # `pg_isready` returns success while the server is still starting up, so
-      # the user and database are named explicitly to test a real connection.
-      test: ["CMD-SHELL", "pg_isready -U incidentflow -d incidentflow"]
+      # -h is the whole point. Without a host, pg_isready connects over the
+      # Unix socket -- and the official image runs its initialisation phase on a
+      # temporary server started with listen_addresses='', socket only, TCP not
+      # listening. The probe therefore succeeds mid-initdb, the container is
+      # marked healthy, and every service waiting on service_healthy is released
+      # into a database that accepts nothing on 5432. Measured on a fresh volume:
+      # socket reports ready at t=1.8s, TCP only at t=3.3s. Naming the user and
+      # database does not close that window -- pg_isready never opens a database
+      # connection, it only asks the postmaster whether it is accepting them.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U incidentflow -d incidentflow"]
       interval: 5s
       timeout: 3s
       retries: 20
