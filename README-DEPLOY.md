@@ -1,5 +1,86 @@
 # Deploying IncidentFlow
 
+## Railway (current target — one project, nothing sleeps)
+
+Everything runs in a single Railway project: Postgres, Redis, and five services.
+`web` is the only one with a public domain; it serves the SPA *and* proxies
+`/api`, `/horizon`, `/realtime` and `/ws` to its siblings over Railway's private
+network. One origin, because the refresh token is an httpOnly cookie and two
+domains would make it cross-site.
+
+| Service     | Root       | Config                        | Public |
+|-------------|------------|-------------------------------|--------|
+| `web`       | `web/`     | `railway.json`                | yes    |
+| `api`       | `api/`     | `railway.json`                | no     |
+| `horizon`   | `api/`     | `railway.horizon.json`        | no     |
+| `scheduler` | `api/`     | `railway.scheduler.json`      | no     |
+| `realtime`  | `realtime/`| `railway.json`                | no     |
+
+`horizon` and `scheduler` build the same image as `api` and differ only in
+start command, so their Railway services point at `api/` with the **config file
+path** set to the file above.
+
+### Never sleeping
+
+Every `railway.json` sets `deploy.sleepApplication: false` and
+`restartPolicyType: ALWAYS`. This is not a preference. A slept service stops the
+queue worker, stops the scheduler, and drops every open SSE connection — the
+three things this architecture exists to provide. Do not enable app sleeping to
+save credit; move to a cheaper plan tier instead.
+
+### Two things that fail silently if skipped
+
+**1. IPv6.** Railway's private DNS (`*.railway.internal`) resolves to IPv6 only.
+A service listening on IPv4 alone is unreachable from a sibling no matter how
+correct the hostname is. The api's nginx template now binds both stacks; the
+realtime service needs `HOST=::` set as a variable (its default is `0.0.0.0`).
+
+**2. JWT keys must be injected, not generated.** In Docker Compose, `api`,
+`horizon` and `scheduler` share one `jwt-keys` volume. On Railway they are three
+separate containers with no shared filesystem, so each would generate its *own*
+key pair on boot and tokens minted by one would fail verification in another.
+Generate the pair once and set it as variables:
+
+```bash
+php artisan jwt:keys --force --show
+```
+
+Set `JWT_PRIVATE_KEY` on `api`, `horizon` and `scheduler`; set `JWT_PUBLIC_KEY`
+on all of those plus `realtime`. Leave `JWT_PRIVATE_KEY_PATH` unset — a value
+in `JWT_PRIVATE_KEY` takes precedence over the file path.
+
+### Variables
+
+`api`, `horizon`, `scheduler` share: `APP_KEY`, `APP_ENV=production`,
+`APP_DEBUG=false`, `LOG_CHANNEL=stderr`, `PORT=8080`, `JWT_PRIVATE_KEY`,
+`JWT_PUBLIC_KEY`, `APP_URL`/`FRONTEND_URL` (the `web` domain), plus
+`DB_*` and `REDIS_*` from Railway's Postgres and Redis references.
+
+`realtime`: `PORT=3001`, `HOST=::`, `JWT_PUBLIC_KEY`, Redis reference,
+and the `web` domain as its allowed origin.
+
+`web`: `API_INTERNAL=api.railway.internal:8080`,
+`REALTIME_INTERNAL=realtime.railway.internal:3001`.
+
+### Migrations
+
+The container entrypoint deliberately does not migrate — see the comment at the
+top of `api/docker/entrypoint.sh`. Run it once, by hand, after the first deploy:
+
+```bash
+railway run --service api php artisan migrate --force --seed
+```
+
+### Requires a paid plan
+
+Provisioning this project on a free Railway workspace fails with *"Free plan
+resource provision limit exceeded"*. Always-on services are a paid-plan
+property, so the never-sleep requirement and the free tier are mutually
+exclusive by definition.
+
+---
+
+
 The frontend and the backend go to different places, and there is a real reason
 for that rather than a preference.
 

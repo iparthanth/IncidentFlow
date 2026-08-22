@@ -1,0 +1,136 @@
+# ---------------------------------------------------------------------------
+# IncidentFlow edge, Railway edition.
+#
+# On Railway each service is its own container with its own domain, so the
+# compose edge (infra/nginx) cannot be reused verbatim: it reaches the API over
+# FastCGI through a shared bind mount, and no such mount exists here.
+#
+# It does not need to. The api image's `render` stage already runs nginx and
+# PHP-FPM together behind one HTTP port, so this edge proxies HTTP to it rather
+# than speaking FastCGI, and serves the SPA from its own filesystem.
+#
+# One public domain, everything else private. That is the same decision the
+# compose edge documents, and it is load-bearing: the refresh token is an
+# httpOnly cookie, so splitting the SPA and the API across two domains would
+# make it cross-site and force SameSite=None plus CORS credentials. Same-origin
+# keeps the cookie first-party and CORS absent.
+# ---------------------------------------------------------------------------
+
+server {
+    # Dual-stack on purpose. Railway routes inbound traffic over IPv6, and
+    # `listen ${PORT}` alone binds IPv4 only.
+    listen ${PORT};
+    listen [::]:${PORT};
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # ${RESOLVER} is the container's own nameserver, read from /etc/resolv.conf
+    # at boot. It has to be declared: without it nginx resolves an upstream once
+    # at startup and caches the address forever, so the first redeploy of api or
+    # realtime hands this edge a dead IP until it is itself restarted.
+    resolver ${RESOLVER} valid=10s ipv6=on;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+
+    # --- Realtime stream ---------------------------------------------------
+    location /realtime/ {
+        set $realtime_upstream "${REALTIME_INTERNAL}";
+        proxy_pass http://$realtime_upstream/;
+        proxy_http_version 1.1;
+
+        # Buffering is the classic SSE killer: nginx would hold events until its
+        # buffer filled, turning a live feed into batch delivery.
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+
+        proxy_set_header Connection '';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # A stream is meant to stay quiet for long stretches; the default 60s
+        # read timeout would sever every idle connection once a minute.
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        add_header X-Accel-Buffering "no" always;
+    }
+
+    # --- WebSocket transport ----------------------------------------------
+    location /ws {
+        set $ws_upstream "${REALTIME_INTERNAL}";
+        proxy_pass http://$ws_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+        proxy_buffering off;
+    }
+
+    # --- REST API and the queue dashboard ----------------------------------
+    # Rate limiting lives in the API here rather than at this edge: Laravel's
+    # named limiters already cover these routes, and duplicating the buckets in
+    # two places means two numbers to keep in step.
+    location /api/ {
+        set $api_upstream "${API_INTERNAL}";
+        proxy_pass http://$api_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+
+        # Streaming CSV exports must reach the client as they are produced.
+        proxy_buffering off;
+    }
+
+    location /horizon {
+        set $horizon_upstream "${API_INTERNAL}";
+        proxy_pass http://$horizon_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location ~ /\.(?!well-known) {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    # --- SPA ---------------------------------------------------------------
+    # Last, so every API and realtime prefix matches first.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        expires 0;
+    }
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/json application/javascript
+               application/x-javascript text/xml application/xml image/svg+xml;
+}

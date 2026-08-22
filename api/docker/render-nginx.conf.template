@@ -9,6 +9,10 @@
 
 server {
     listen ${PORT};
+    # Dual-stack. Railway's private DNS (*.railway.internal) resolves to IPv6
+    # only, so an IPv4-only listener is unreachable from a sibling service
+    # however correct the hostname is. Harmless on Render, required here.
+    listen [::]:${PORT};
     server_name _;
     root /var/www/html/public;
     index index.php;

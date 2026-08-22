@@ -35,3 +35,19 @@ EXPOSE 80
 
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 \
     CMD wget -q --spider http://127.0.0.1/ || exit 1
+
+# ---------------------------------------------------------------------------
+# Railway edge. Same bundle, different job: this stage is not only the SPA host
+# but the single public entry point, proxying /api, /horizon, /realtime and /ws
+# to sibling services over Railway's private network. See
+# docker/nginx-railway.conf.template for why one origin rather than three.
+FROM nginx:1.27-alpine AS railway
+
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY docker/nginx-railway.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/railway-entrypoint.sh /usr/local/bin/edge
+RUN chmod +x /usr/local/bin/edge
+
+# No EXPOSE and no HEALTHCHECK: Railway assigns the port at runtime and runs its
+# own health probe from railway.json, so a baked-in port would only be a lie.
+CMD ["/usr/local/bin/edge"]
