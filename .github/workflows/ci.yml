@@ -303,7 +303,20 @@ jobs:
 
       - name: Capture logs on failure
         if: failure()
-        run: docker compose logs --no-color --tail 200
+        run: |
+          # migrate gates the whole stack, so its log is the one that explains a
+          # failed run -- but `logs --tail 200` interleaves nine services and the
+          # few lines that matter get buried. Print it first, in full, and say
+          # which commit produced it: a cached build layer makes it genuinely
+          # ambiguous whether a given run contains a given fix.
+          echo "commit: ${GITHUB_SHA}"
+          echo "::group::migrate (full)"
+          docker compose logs --no-color migrate || true
+          echo "::endgroup::"
+          docker compose ps -a || true
+          echo "::group::all services (tail)"
+          docker compose logs --no-color --tail 200 || true
+          echo "::endgroup::"
 
       - name: Upload traces
         if: failure()
