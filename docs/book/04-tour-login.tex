@@ -1,0 +1,267 @@
+\part{The guided tour}
+
+% Part divider text: see the note in main.tex about \@endpart.
+\noindent\textbf{\large What this part covers}
+
+\medskip
+\noindent
+One chapter per screen. Each opens with a photograph of the running application,
+then shows the code that produced it, then explains the decisions behind that
+code. The file path is printed above every listing, so you can open the same
+file on your own machine and read along.
+
+\medskip
+\noindent
+These chapters are meant to be read at the keyboard with the stack running. If
+it is not running yet, jump forward to Part~III, start it, and come back.
+
+\chapter{Sign in}
+\label{ch:login}
+
+\shot{01-login-empty.png}{The sign-in screen. Everything an unauthenticated
+visitor can see of IncidentFlow.}
+
+\section{What is deliberately missing}
+
+Look at the screenshot again and notice what is \emph{not} there: there are no
+demo account credentials printed on the page.
+
+They used to be. During development it is convenient to show ``sign in as
+\fpath{admin@example.com} / \fpath{password}'' right on the form. It was removed,
+and the reason is written into the file so nobody adds it back:
+
+\where{web/src/pages/LoginPage.tsx}
+\begin{lstlisting}[language=tsx]
+/**
+ * Sign-in.
+ *
+ * Note what is deliberately absent: demo account credentials. They used to be
+ * printed here for convenience. A password rendered on a login screen trains
+ * every visitor to treat this as a toy, and there is no way for a viewer to
+ * tell "seeded demo password" from "real password left in the markup". They now
+ * live in the README and the setup manual, where a reader has already chosen to
+ * look at project documentation.
+ */
+\end{lstlisting}
+
+\note{This is a small thing that says something larger. A visitor cannot tell
+the difference between a password that is safe to show and one that is not ---
+so showing any password teaches them that this application is careless with
+them. The credentials did not disappear; they moved somewhere a reader arrives
+deliberately.}
+
+\section{The two halves of the screen}
+
+The layout is a split panel: brand on the left, form on the right. The left half
+vanishes on a narrow screen, and that is a decision rather than a default:
+
+\where{web/src/pages/LoginPage.tsx}
+\begin{lstlisting}[language=tsx]
+{/* ---------------------------------------------------------------- */}
+{/* Brand panel. Hidden below lg: on a phone it would push the actual */}
+{/* form below the fold, which is the one thing a login page must not */}
+{/* do.                                                              */}
+{/* ---------------------------------------------------------------- */}
+<aside className="relative hidden overflow-hidden bg-brand-900 p-12 lg:flex lg:flex-col lg:justify-between">
+\end{lstlisting}
+
+The \fpath{hidden} and \fpath{lg:flex} classes are Tailwind: hidden by default,
+becoming a flex column only at the \fpath{lg} breakpoint and above. On a phone
+the form is the first thing on screen.
+
+\section{The password field, and why it has an eye}
+
+\shot{03-login-password-revealed.png}{The reveal toggle, shown pressed. The
+field's type flips between \fpath{password} and \fpath{text}.}
+
+\where{web/src/pages/LoginPage.tsx}
+\begin{lstlisting}[language=tsx]
+<input
+  id="password"
+  type={showPassword ? 'text' : 'password'}
+  autoComplete="current-password"
+  required
+  value={password}
+  onChange={(event) => setPassword(event.target.value)}
+  className="input pr-11"
+/>
+<button
+  type="button"
+  onClick={() => setShowPassword((visible) => !visible)}
+  // Typos are invisible in a masked field and the error message
+  // is deliberately unhelpful, so a reveal toggle is the only
+  // way to tell a wrong password from a mistyped one.
+  aria-label={showPassword ? 'Hide password' : 'Show password'}
+  className="absolute inset-y-0 right-0 grid w-11 place-items-center ..."
+>
+\end{lstlisting}
+
+Three details in that block are worth naming.
+
+\begin{description}[leftmargin=1.2cm,style=nextline]
+\item[\fpath{type=\{showPassword ? 'text' : 'password'\}}] React re-renders the
+  input with a different \fpath{type} attribute. There is no separate ``visible''
+  input; it is one field that changes character.
+\item[\fpath{autoComplete="current-password"}] Tells the browser and password
+  managers what this field is. Without it, saved passwords do not offer
+  themselves, and users blame your application.
+\item[\fpath{aria-label}] What a screen reader announces for a button whose
+  visible content is an icon with no text.
+\end{description}
+
+\bugbox{That \fpath{aria-label} broke every end-to-end test the day it was
+added. The tests located the password field with
+\fpath{getByLabel('Password')}, and Playwright's \fpath{getByLabel} matches
+\emph{substrings} --- so ``Password'' also matched ``Show password'' on the new
+button. Two elements matched one locator, and Playwright refuses to guess. Full
+story in Chapter~\ref{ch:bugs-frontend}.}
+
+\section{What happens when you press Sign in}
+
+\where{web/src/pages/LoginPage.tsx}
+\begin{lstlisting}[language=tsx]
+async function handleSubmit(event: FormEvent) {
+  event.preventDefault();
+  setError(null);
+  setSubmitting(true);
+
+  try {
+    await login(email, password);
+  } catch (cause) {
+    // The server deliberately returns the same message for an unknown email
+    // and a wrong password; passing it straight through keeps the client from
+    // reintroducing the enumeration leak the API was careful to avoid.
+    setError(
+      cause instanceof ApiError ? cause.message : 'Sign-in failed. Check your connection and try again.',
+    );
+  } finally {
+    setSubmitting(false);
+  }
+}
+\end{lstlisting}
+
+\fpath{event.preventDefault()} stops the browser's default behaviour of
+reloading the page when a form is submitted. Without it, React never sees the
+submission --- the page simply navigates.
+
+\section{The error message is deliberately unhelpful}
+
+\shot{02-login-error.png}{A failed sign-in. Read the message carefully.}
+
+The message is \emph{``Those credentials do not match our records.''} It does
+not say whether the email exists.
+
+That is not laziness. Here is the server code:
+
+\where{api/app/Http/Controllers/Api/V1/AuthController.php}
+\begin{lstlisting}[language=PHP]
+$user = User::query()->where('email', $credentials['email'])->first();
+
+/**
+ * Hash::check runs even when the user does not exist would be ideal for
+ * constant time; Laravel's own attempt() has the same shape. The real
+ * defence against enumeration here is the identical response for both
+ * cases, plus the per-email+IP rate limit on this route.
+ */
+if ($user === null || ! Hash::check($credentials['password'], $user->password)) {
+    return $this->invalidCredentials($request);
+}
+\end{lstlisting}
+
+\note{This defends against \textbf{user enumeration}. If a wrong password said
+``incorrect password'' and an unknown address said ``no such user'', anyone could
+discover who has an account by trying addresses --- useful for phishing, and for
+knowing which passwords are worth attacking. One message for both cases removes
+that signal. The cost is a slightly worse experience for someone who genuinely
+mistyped their address, which is why the reveal toggle exists.}
+
+\subsection{A disabled account is treated differently}
+
+\where{api/app/Http/Controllers/Api/V1/AuthController.php}
+\begin{lstlisting}[language=PHP]
+if (! $user->is_active) {
+    return response()->json([
+        'error' => [
+            'code' => 'account_disabled',
+            'message' => 'This account has been disabled. Contact an administrator.',
+            'request_id' => $request->headers->get('X-Request-Id'),
+        ],
+    ], Response::HTTP_FORBIDDEN);
+}
+\end{lstlisting}
+
+This message \emph{is} specific, and that is consistent rather than
+contradictory: to reach it you must already have supplied the correct password,
+so you are not an attacker probing for valid addresses --- you are the account
+holder, and telling you to contact an administrator is the useful answer.
+
+\subsection{Every error has the same shape}
+
+Notice the JSON: \fpath{code}, \fpath{message}, \fpath{request\_id}. Every error
+the API produces has that shape, from any endpoint, formatted in one place.
+
+\where{api/app/Exceptions/ApiExceptionRenderer.php}
+\begin{lstlisting}[language=PHP]
+/**
+ * One error shape for the entire API.
+ *
+ *   { "error": { "code", "message", "details", "request_id" } }
+ *
+ * Central error handling is not about tidiness. It is about two properties
+ * that are impossible to maintain if each controller formats its own failures:
+ *
+ *  - the frontend has exactly one parser, and switches on a stable `code`
+ *    rather than on prose that changes when someone rewords a message;
+ *  - server faults never leak internals.
+ */
+\end{lstlisting}
+
+The \fpath{request\_id} matters operationally: it appears in the response
+\emph{and} in the server log, so a user reporting ``it failed'' can quote a
+string that leads straight to the exact log line.
+
+\section{What sign-in actually returns}
+
+Two things, and they are stored differently on purpose.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.3cm}>{\raggedright\arraybackslash}p{3.0cm}p{7.6cm}@{}}
+\toprule
+\textbf{Token} & \textbf{Lives} & \textbf{Why there} \\
+\midrule
+Access token & In memory (JavaScript) & Short-lived, 15 minutes. Sent on every API call. Never written to disk, so a stolen laptop does not hand it over. \\
+Refresh token & \fpath{httpOnly} cookie & 30 days. JavaScript cannot read it at all, so a cross-site scripting bug cannot steal it. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+You can see the cookie's exact settings by signing in with \fpath{curl}:
+
+\begin{lstlisting}[language=bash]
+curl -s -i -X POST http://localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"responder@incidentflow.test","password":"incidentflow"}' \
+  | grep -i set-cookie
+\end{lstlisting}
+
+\expect{A line containing \fpath{httponly}, \fpath{samesite=lax}, and
+\fpath{path=/api/v1/auth}. That path is a deliberate narrowing: the cookie is
+only ever sent to the four authentication endpoints, so it is not attached to
+the hundreds of other API calls that have no use for it.}
+
+\warnbox{In production the same cookie also carries \fpath{Secure}, which means
+the browser will only send it over HTTPS. This has a consequence that has caught
+many people, including during this project: deploy over plain HTTP and sign-in
+\emph{appears} to work, then the session dies about fifteen minutes later when
+the access token expires and the refresh cookie is never sent back. Nothing
+errors, and no log records it. Chapter~\ref{ch:bugs-deploy} covers it.}
+
+\section{Check your understanding}
+
+\begin{itemize}[leftmargin=1.4cm]
+\cbox Why does the sign-in error not tell you whether the email exists?
+\cbox Why is the access token kept in memory rather than \fpath{localStorage}?
+\cbox Why can JavaScript not read the refresh cookie?
+\cbox What would break if \fpath{event.preventDefault()} were removed from
+  \fpath{handleSubmit}?
+\end{itemize}

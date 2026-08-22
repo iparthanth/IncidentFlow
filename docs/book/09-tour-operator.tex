@@ -1,0 +1,116 @@
+\chapter{The operator surfaces}
+\label{ch:operator}
+
+Three screens that users never see. They are for whoever runs the system --- and
+during development, that is you.
+
+\section{Admin: the audit log}
+
+\shot{13-admin.png}{The administration screen. Members, services, and the audit
+log.}
+
+The audit log is the part worth studying. Every action that changes anything is
+recorded here: who did it, to what, and when.
+
+\note{This is a \emph{second} append-only record, and it is not the same thing
+as the incident timeline. The timeline answers ``what happened to this
+incident?'' and is visible to everyone. The audit log answers ``what did this
+\emph{person} do?'' across the whole organisation, and only an administrator can
+read it. One is the story of an event; the other is the story of an actor.}
+
+You saw it being written during sign-in, in Chapter~\ref{ch:login}:
+
+\where{api/app/Http/Controllers/Api/V1/AuthController.php}
+\begin{lstlisting}[language=PHP]
+$this->audit->record('auth.logged_in', $user, $user);
+\end{lstlisting}
+
+Three arguments: what happened, who did it, and what it happened to. For a
+sign-in the actor and the subject are the same person, which is why \fpath{\$user}
+appears twice.
+
+\section{Horizon: watching the queue}
+
+\shot{14-horizon-dashboard.png}{Laravel Horizon at
+\fpath{http://localhost:8080/horizon}. Jobs processed, jobs failed, throughput.}
+
+Chapter~\ref{ch:arch} said the API writes a notification row and returns
+immediately, leaving \fpath{horizon} to do the sending. This is where you watch
+that happen.
+
+It answers questions that are otherwise invisible:
+
+\begin{itemize}[leftmargin=1.4cm]
+\item Are jobs being processed at all, or is the queue silently stuck?
+\item Is anything failing repeatedly?
+\item How long is work waiting before it is picked up?
+\end{itemize}
+
+\warnbox{This dashboard was completely broken for most of this project's life,
+and nothing detected it. The page returned HTTP 200. The server logs were clean.
+The health checks passed. It simply rendered a blank dark rectangle, and the
+only evidence anywhere was in the browser's developer console.
+Chapter~\ref{ch:bugs-infra} is that investigation in full --- it is the single
+best example in this book of a failure that no amount of reading the server logs
+would ever have found.}
+
+\section{Mailpit: catching email that must not escape}
+
+\shot{15-mailpit.png}{Mailpit at \fpath{http://localhost:8025}. Every email the
+system has sent, and not one of them delivered to a real person.}
+
+In development, IncidentFlow sends its email to \fpath{mailpit} instead of a
+real mail server. Mailpit accepts everything and delivers nothing, showing it in
+a web inbox instead.
+
+\note{This is not merely convenient. The seeded database contains addresses like
+\fpath{commander@incidentflow.test}, but a realistic test dataset eventually
+contains something that looks like a real address --- and a \fpath{sev1}
+notification mails every responder in the organisation. Without a catcher,
+running the test suite once could send mail to strangers. Mailpit makes that
+mistake impossible rather than unlikely.}
+
+\subsection{Watch the whole chain in one action}
+
+This is the best single exercise in the book, because it exercises five
+containers at once.
+
+\begin{enumerate}[leftmargin=1.5cm]
+\item Open \fpath{http://localhost:8025} in one tab. It should be empty or
+  nearly so.
+\item In another tab, sign in as \fpath{commander@incidentflow.test} and create
+  an incident with severity \textbf{sev1}.
+\item Watch the Mailpit tab.
+\end{enumerate}
+
+\expect{Email appears in Mailpit within a second or two, one per responder in
+the organisation. You have just watched: the \textbf{api} write rows and commit;
+\textbf{redis} carry the job; \textbf{horizon} pick it up; \textbf{mailpit}
+receive the result --- and \textbf{postgres} holding the record throughout.}
+
+\warnbox{If no mail arrives, the fault is almost always Horizon rather than the
+mail path. Check \fpath{docker compose logs horizon}, and check the Horizon
+dashboard for failed jobs. A notification row that stays \fpath{pending} means
+the job was never queued or never ran; one marked \fpath{failed} means it ran
+and threw.}
+
+\subsection{Try the same thing at sev3}
+
+Create a second incident, this time \textbf{sev3}. No email arrives.
+
+That is the rule from Chapter~\ref{ch:what}: only \fpath{sev1} and \fpath{sev2}
+notify the whole responder pool. You have now seen one enum value decide whether
+a hundred people are interrupted --- which is the concrete reason changing
+severity is a permission most roles do not have.
+
+\section{Check your understanding}
+
+\begin{itemize}[leftmargin=1.4cm]
+\cbox What question does the audit log answer that the incident timeline does
+  not?
+\cbox Why does sending email through a queue make the API faster \emph{and}
+  more reliable?
+\cbox Why is a mail catcher a safety feature rather than a convenience?
+\cbox A notification row is stuck at \fpath{pending}. What are the two
+  possibilities?
+\end{itemize}

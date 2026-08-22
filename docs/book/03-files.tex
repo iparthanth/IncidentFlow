@@ -1,3 +1,215 @@
-\chapter{Every file, and why}\label{ch:files} Placeholder.
-\chapter{Roles}\label{ch:roles} Placeholder.
-\chapter{Sign in}\label{ch:login} Placeholder.
+\chapter{Every file, and why}
+\label{ch:files}
+
+You cannot hold 174 PHP files in your head, and you do not need to. What you
+need is a reliable answer to one question: \emph{if I want to change X, which
+folder do I open?} This chapter gives you that.
+
+\section{The top level}
+
+\begin{lstlisting}
+D:\IncidentFlow\
+|
++-- api/                  the Laravel backend  (all the rules live here)
++-- web/                  the React frontend   (what you look at)
++-- realtime/             the Node service     (live updates)
++-- infra/nginx/          the front door's configuration
++-- scripts/              operational scripts (database backup)
++-- deploy/               deployment runbooks
++-- docs/                 this book, and the screenshots in it
+|
++-- docker-compose.yml        development: the nine containers
++-- docker-compose.prod.yml   production overlay (no bind mounts, no open ports)
++-- docker-compose.tls.yml    adds HTTPS for a single-server deployment
++-- Makefile                  short names for long commands
++-- README.md                 the short version of this book
+\end{lstlisting}
+
+\note{Three top-level folders --- \fpath{api}, \fpath{web}, \fpath{realtime} ---
+are the three programs \emph{we} wrote. Everything else is either configuration
+that wires them together or documentation. If you remember only one thing from
+this chapter, remember those three.}
+
+\section{Inside api/ --- where the rules live}
+
+This is the largest and most important part of the system. Laravel puts almost
+everything under \fpath{app/}.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.3cm}rp{8.2cm}@{}}
+\toprule
+\textbf{Folder} & \textbf{Files} & \textbf{What is in it} \\
+\midrule
+\fpath{app/Models} & 14 & One class per database table. \fpath{Incident}, \fpath{User}, \fpath{AuditLog}. \\
+\fpath{app/Http/Controllers} & 19 & The entry point for each HTTP request. \\
+\fpath{app/Http/Resources} & 11 & Turns a model into the JSON the API returns. \\
+\fpath{app/Http/Middleware} & 6 & Runs before a request reaches a controller. \\
+\fpath{app/Http/Requests} & --- & Validates incoming data before anything touches it. \\
+\fpath{app/Enums} & 9 & Fixed sets of values --- statuses, severities, roles. \\
+\fpath{app/Policies} & 4 & Who is allowed to do what. \\
+\fpath{app/Services} & 12 & The actual business logic, grouped by subject. \\
+\fpath{app/Jobs} & 1 & Work that happens in the background. \\
+\fpath{app/Console/Commands} & 3 & Things you can run by hand or on a schedule. \\
+\fpath{app/Exceptions} & 6 & Named failures, and the one place errors are formatted. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+And outside \fpath{app/}:
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.3cm}p{9.4cm}@{}}
+\toprule
+\textbf{Folder} & \textbf{What is in it} \\
+\midrule
+\fpath{database/migrations} & 8 files that create the tables. Run in order, they build the schema from nothing. \\
+\fpath{database/seeders} & Fills a fresh database with realistic demo data. \\
+\fpath{routes/api.php} & The map from URL to controller. Start here when tracing anything. \\
+\fpath{config/} & Settings, all reading from environment variables. \\
+\fpath{tests/} & 13 test files, 114 tests. \\
+\fpath{docker/} & The container's own files: entrypoint, PHP settings, nginx template. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{One controller per action, not one per resource}
+
+Open \fpath{app/Http/Controllers/Api/V1/} and you will find something unusual.
+
+\begin{lstlisting}
+AuthController.php                 IncidentSeverityController.php
+AuditLogController.php             IncidentStatusController.php
+HealthController.php               IncidentUpdateController.php
+IncidentAssigneeController.php     MemberController.php
+IncidentCommanderController.php    MetricsController.php
+IncidentCommentController.php      NotificationController.php
+IncidentController.php             OrganizationController.php
+IncidentEventController.php        PostmortemController.php
+IncidentExportController.php       RealtimeTicketController.php
+                                   ServiceController.php
+\end{lstlisting}
+
+There are \emph{eight} controllers whose name begins with \fpath{Incident}. A
+more common design would have one \fpath{IncidentController} with a dozen
+methods on it: \fpath{updateStatus}, \fpath{changeSeverity}, \fpath{assign},
+\fpath{comment}, \fpath{export}, and so on.
+
+\note{Splitting them has a specific payoff. Changing an incident's
+\emph{severity} and changing its \emph{status} need different permissions, emit
+different timeline events, and notify different people. As methods on one class
+they would share a file, and over time they would start sharing helper methods
+and drifting into each other. As separate classes each has exactly one reason to
+change, and the route file reads as a list of capabilities rather than a list of
+URLs.}
+
+\subsection{Where the real logic lives}
+
+Controllers here are deliberately thin. They check the request, hand off, and
+format the reply. The thinking happens in \fpath{app/Services}.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.0cm}p{8.7cm}@{}}
+\toprule
+\textbf{Service folder} & \textbf{Responsible for} \\
+\midrule
+\fpath{Services/Incidents} & Creating and changing incidents; recording the timeline. Three files, and the most important code in the project. \\
+\fpath{Services/Auth} & Issuing and verifying tokens, and the key pair they are signed with. \\
+\fpath{Services/Notifications} & Deciding who hears about what, and writing the rows before anything is sent. \\
+\fpath{Services/Realtime} & Publishing events to Redis so the realtime tier can forward them. \\
+\fpath{Services/Metrics} & Computing time-to-acknowledge and time-to-resolve. \\
+\fpath{Services/Audit} & Writing the append-only audit log. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warnbox{If you are ever lost in this codebase, the fastest route is:
+\fpath{routes/api.php} tells you which controller handles a URL; the controller
+tells you which service does the work; the service is where the answer is. Three
+hops, every time. Resist the urge to grep --- following the path teaches you the
+structure, and grep does not.}
+
+\section{Inside web/ --- what you look at}
+
+Thirty-six TypeScript files, in a conventional React layout.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.3cm}p{9.4cm}@{}}
+\toprule
+\textbf{Folder} & \textbf{What is in it} \\
+\midrule
+\fpath{src/pages} & One file per screen. Nine of them --- and Part~II gives each its own chapter. \\
+\fpath{src/components} & Pieces reused across screens: the layout, the timeline, badges, dialogs. \\
+\fpath{src/lib} & The API client. Every request the browser makes goes through one file. \\
+\fpath{src/auth} & Holding the signed-in user, and refreshing the token before it expires. \\
+\fpath{src/hooks} & Data fetching, and the live connection to the realtime service. \\
+\fpath{e2e/} & Browser tests that drive the whole stack the way a person would. \\
+\fpath{docker/} & The nginx config that serves the built files. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{\fpath{src/lib/api-client.ts} is worth finding early. \emph{Every} call
+the frontend makes passes through it, which is why the token refresh, the error
+shape, and the base URL are each defined exactly once. When you later read that
+the API returns one consistent error envelope, this is the file that depends on
+it being true.}
+
+\section{Inside realtime/ --- the live connection}
+
+The smallest of the three: twelve files, doing one thing --- holding connections
+open and forwarding events onto them.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.3cm}p{9.4cm}@{}}
+\toprule
+\textbf{File or folder} & \textbf{What it does} \\
+\midrule
+\fpath{src/index.ts} & Starts the server, and shuts it down carefully. \\
+\fpath{src/app.ts} & The routes: \fpath{/healthz}, \fpath{/readyz}, \fpath{/stream}, \fpath{/metrics}. \\
+\fpath{src/config.ts} & Reads and validates environment variables at boot. \\
+\fpath{src/} (rest) & Subscribing to Redis, verifying tokens, tracking connections. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warnbox{The realtime service can \emph{verify} tokens but cannot \emph{create}
+them. It is given only the public half of the signing key. This is deliberate:
+the realtime tier holds thousands of open connections and is the most exposed
+part of the system, so if it were ever compromised the attacker would gain the
+ability to read tokens --- not to mint new ones. You will see the mechanism in
+Part~II.}
+
+\section{Everything else}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.2cm}p{8.5cm}@{}}
+\toprule
+\textbf{Path} & \textbf{What it is} \\
+\midrule
+\fpath{infra/nginx/default.conf} & The routing table for the entire system: which URL goes to which service. Read it once and the architecture stops being abstract. \\
+\fpath{infra/caddy/Caddyfile} & The HTTPS terminator, used only when deploying to a single server. \\
+\fpath{scripts/backup-db.sh} & Nightly database backup. \\
+\fpath{docker-compose.yml} & Defines the nine containers, their network, and their storage. \\
+\fpath{Makefile} & Short aliases, so you type \fpath{make up} rather than a 90-character command. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{A rule of thumb for finding anything}
+
+\begin{center}
+\begin{tabular}{@{}p{6.4cm}p{7.3cm}@{}}
+\toprule
+\textbf{You want to change\ldots} & \textbf{Open\ldots} \\
+\midrule
+what a screen looks like & \fpath{web/src/pages/} \\
+what data a screen shows & \fpath{web/src/hooks/} \\
+who is allowed to do something & \fpath{api/app/Policies/} \\
+what happens when they do it & \fpath{api/app/Services/} \\
+the shape of the JSON returned & \fpath{api/app/Http/Resources/} \\
+a database column & \fpath{api/database/migrations/} \\
+which URL reaches which code & \fpath{api/routes/api.php} \\
+which service answers a URL & \fpath{infra/nginx/default.conf} \\
+\bottomrule
+\end{tabular}
+\end{center}

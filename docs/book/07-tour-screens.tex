@@ -1,0 +1,159 @@
+\chapter{Services, metrics and postmortems}
+\label{ch:screens}
+
+Three shorter screens. Each exists because a different person asks a different
+question after --- or before --- an incident.
+
+\section{Services: what can break}
+
+\shot{07-services.png}{The services registry. Every incident is attached to one
+of these.}
+
+A \emph{service} is a named part of your system: the payments API, the search
+cluster, the mobile gateway. Incidents attach to one.
+
+\note{This is why the incidents list can be filtered by service, and why the
+metrics page can say ``the payments API had four incidents this month''. Without
+a registry you would have a free-text field, everyone would spell things
+differently, and no grouping would ever be reliable. A dropdown of known values
+is a small constraint that makes every downstream question answerable.}
+
+Each service carries an owning team and a criticality. Only an administrator can
+add or change one --- the registry is reference data, and reference data that
+anyone can edit stops being reference data.
+
+\section{Metrics: are we getting better or worse?}
+
+\shot{08-metrics.png}{Reliability metrics over a chosen window.}
+
+Two numbers dominate this page, and both are industry standard.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.2cm}>{\raggedright\arraybackslash}p{4.4cm}p{7.2cm}@{}}
+\toprule
+\textbf{Metric} & \textbf{Full name} & \textbf{What it tells you} \\
+\midrule
+MTTA & Mean time to acknowledge & How long before a human picks it up. Measures your \emph{alerting and staffing}. \\
+MTTR & Mean time to resolve & How long from report to fixed. Measures your \emph{systems and tooling}. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{The distinction matters when deciding what to fix. A bad MTTA and a good
+MTTR means alerts are not reaching people --- a rota problem. A good MTTA and a
+bad MTTR means people respond promptly and then struggle --- a tooling or
+architecture problem. One number cannot tell you which, which is why there are
+two.}
+
+\subsection{The numbers are precomputed, not counted on the fly}
+
+\where{api/app/Services/Metrics/}
+\begin{lstlisting}[language=PHP]
+/**
+ * Reliability metrics: MTTA, MTTR, throughput and acknowledgement-SLA
+ * ...
+ * columns `time_to_acknowledge_seconds` and `time_to_resolve_seconds` are
+ * ...
+ * `percentile_cont` nor `date_trunc` exists in SQLite, and a metrics endpoint
+ */
+\end{lstlisting}
+
+When an incident is acknowledged, the elapsed seconds are written onto the
+incident row there and then. The metrics page averages a stored number rather
+than recomputing durations by scanning the timeline.
+
+\note{Storing a derived value is normally poor practice --- it can drift from
+the truth. It is right here because the value is \emph{immutable once written}:
+the moment of acknowledgement never changes, so the duration never changes
+either. The rule of thumb is that caching a derived value is safe exactly when
+its inputs can no longer move.}
+
+\warnbox{That comment mentions SQLite, and it is a warning from experience. The
+tests run on SQLite for speed; production runs PostgreSQL.
+\fpath{percentile\_cont} and \fpath{date\_trunc} exist only in the latter. Code
+written naturally against PostgreSQL passes review, fails in the test suite, and
+--- worse --- code written to satisfy SQLite can behave differently in
+production. Chapter~\ref{ch:bugs-backend} contains a bug of exactly this
+family.}
+
+\section{Postmortems: what did we learn?}
+
+\shot{09-postmortems.png}{Postmortems --- the written record produced after an
+incident is closed.}
+
+A postmortem is the document written afterwards: what happened, why, what was
+done, and what will change so it does not recur.
+
+\subsection{Postmortems are editable --- and that is not a contradiction}
+
+The timeline cannot be edited. A postmortem can. That is deliberate and worth
+being precise about.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.4cm}>{\raggedright\arraybackslash}p{4.2cm}p{6.2cm}@{}}
+\toprule
+& \textbf{Timeline} & \textbf{Postmortem} \\
+\midrule
+What it records & What happened & What we understood \\
+Can change? & Never & Yes, until published \\
+Why & Facts do not change & Understanding improves \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\where{api/app/Models/Postmortem.php}
+\begin{lstlisting}[language=PHP]
+public function isPublished(): bool
+{
+    return $this->status === PostmortemStatus::Published;
+}
+\end{lstlisting}
+
+A postmortem is a \emph{draft} while being written, and \emph{published} when
+finished. Publishing is the point at which it stops being a working document.
+
+\note{This is the same distinction a newspaper makes between a reporter's notes
+and a printed article. Conflating them --- letting people quietly revise the
+record of events because their understanding changed --- is exactly the failure
+mode the append-only timeline exists to prevent.}
+
+\section{Two screens you will meet by accident}
+
+\subsection{Registering an organisation}
+
+\shot{04-register.png}{Creating an organisation. The first account becomes its
+owner.}
+
+There is no ``create an account'' for an existing organisation on this screen ---
+registering creates an \emph{organisation} and makes you its administrator.
+Everyone else is invited from inside.
+
+\warnbox{This is why a production deployment has no demo logins. The seeder
+refuses to run outside development, so on a fresh production database the very
+first thing you do is register, and that first registration becomes the owner.
+Part~III walks through it.}
+
+\subsection{The page that is not there}
+
+\shot{10-not-found.png}{An unknown URL, inside the application shell.}
+
+Notice the navigation is still present. The 404 is rendered \emph{inside} the
+layout, so a mistyped link leaves you somewhere you can navigate away from,
+rather than at a dead end.
+
+\note{A single-page application has to be told to do this. The server does not
+know which paths are real --- it hands \fpath{index.html} to every unknown URL
+and lets the router decide. That is the \fpath{try\_files \$uri \$uri/
+/index.html} line in the web container's nginx config, and without it a hard
+refresh on \fpath{/incidents/42} would return a genuine 404 while clicking
+through to the same page worked fine.}
+
+\section{Check your understanding}
+
+\begin{itemize}[leftmargin=1.4cm]
+\cbox Why is a service registry better than a free-text field?
+\cbox What does a good MTTA with a bad MTTR suggest you should fix?
+\cbox Why is it acceptable to store \fpath{time\_to\_resolve\_seconds} on the
+  incident row?
+\cbox Why may a postmortem be edited when the timeline may not?
+\end{itemize}

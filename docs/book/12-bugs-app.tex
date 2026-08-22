@@ -1,0 +1,266 @@
+\part{Bugs, and how they were found}
+
+\noindent\textbf{\large What this part covers}
+
+\medskip
+\noindent
+Real failures from building this system. Every one of them actually happened.
+Each is told in the same four steps: the \textbf{symptom}, the \textbf{wrong
+guess} that came first, the \textbf{evidence} that corrected it, and the
+\textbf{fix}.
+
+\medskip
+\noindent
+The wrong guesses are included deliberately. Debugging is taught as though the
+right explanation arrives immediately; it does not. What separates people who
+are good at it is not better hunches --- it is refusing to act on a hunch before
+checking it.
+
+\chapter{Bugs in the application}
+\label{ch:bugs-frontend}
+
+\section{The button that broke every test}
+
+\textbf{Symptom.} A reveal toggle was added to the password field. All seven
+browser tests failed instantly, with an error about \emph{strict mode}.
+
+\textbf{Wrong guess.} The tests are stale --- the page changed, so they need
+updating. Reasonable, and wrong in an important way: it treats the failure as
+noise instead of reading it.
+
+\textbf{Evidence.} Playwright's message named the problem exactly: the locator
+resolved to \emph{two} elements.
+
+\where{web/e2e/incident-lifecycle.spec.ts}
+\begin{lstlisting}[language=tsx]
+await page.getByLabel('Password', { exact: true }).fill(DEMO_PASSWORD);
+// Exact, because the field shares the word "password" with the reveal
+// toggle's aria-label ("Show password"). getByLabel substring-matches by
+// default, so without this the locator resolves to two elements and trips
+// strict mode -- which is exactly what happened when the toggle was added.
+\end{lstlisting}
+
+\textbf{The cause.} \fpath{getByLabel('Password')} matches \emph{substrings}.
+The new button's accessible name is ``Show password'', which contains
+``password''. Two elements, one locator.
+
+\textbf{The fix.} \fpath{\{ exact: true \}}.
+
+\note{Strict mode is Playwright refusing to guess. A less careful tool would
+have picked the first match and passed --- and the test would silently have been
+typing the password into a button from then on. An error that stops you is
+better than a pass that means nothing, and this is worth remembering when a tool
+feels pedantic.}
+
+\section{The manual that would have lied}
+
+\textbf{Symptom.} The script that captures the screenshots for this book
+reported success --- 21 files written. Four of them were byte-identical to the
+login page, including the one labelled ``the metrics page''.
+
+\textbf{Wrong guess.} A timing problem: the screenshot fired before the page
+finished rendering. Plausible, and it produced a fix that did not work.
+
+\textbf{Evidence.} Two things, in order. First, file sizes: four files at
+\emph{exactly} 464~KB, the same as the login screenshot. Identical sizes mean
+identical images. Second, a trace of the actual network calls, which showed the
+session being lost partway through the run.
+
+\textbf{The cause.} Two facts that are harmless separately:
+
+\begin{itemize}[leftmargin=1.4cm]
+\item The access token is held in memory only --- so a full page reload loses it
+  and the app must call \fpath{/auth/refresh} to get another.
+\item \fpath{/auth/refresh} is rate-limited against the \emph{same} per-identity
+  bucket as \fpath{login}.
+\end{itemize}
+
+The capture script navigated with \fpath{page.goto()}, which is a full reload, so
+every screen cost one refresh. Add a deliberate failed login for the
+error-message screenshot --- using the same account --- and the tour ran out of
+budget partway through, was logged out, and cheerfully photographed the login
+page over and over.
+
+\textbf{The fix.} Two changes. Navigate by clicking the sidebar, as a user does,
+which needs no reloads at all. And spend the deliberate failure on a
+\emph{different} account.
+
+But the important change was neither of those:
+
+\where{web/capture-screens.mjs}
+\begin{lstlisting}[language=tsx]
+if (expect) {
+  await page.getByRole('heading', { name: expect }).first()
+    .waitFor({ state: 'visible', timeout: 20000 })
+    .catch(() => {
+      throw new Error(
+        `REFUSING to save ${name}.png -- expected heading "${expect}" never appeared. ` +
+          `The page is probably showing Sign in instead.`,
+      );
+    });
+}
+\end{lstlisting}
+
+\warnbox{The script now refuses to save a screenshot it cannot verify. This is
+the general lesson: a process that produces output nobody checks will eventually
+produce confident, wrong output. A picture is worse than prose here, because a
+reader trusts a screenshot completely --- they assume a photograph cannot be
+mistaken about what it shows.}
+
+\chapter{Bugs in the backend}
+\label{ch:bugs-backend}
+
+\section{The one that only failed on PostgreSQL}
+
+\textbf{Symptom.} All tests passed locally. The same commit failed in CI with
+\fpath{SQLSTATE[25P02]}: \emph{current transaction is aborted, commands ignored
+until end of transaction block}.
+
+\textbf{Wrong guess.} A flaky test, or a CI configuration difference. It was
+neither --- it was a real bug that local testing structurally could not find.
+
+\textbf{Evidence.} The tests run against in-memory SQLite for speed; CI also
+runs them against PostgreSQL. Only PostgreSQL has this behaviour.
+
+\textbf{The cause.} The API prevents duplicate submissions with an
+\emph{idempotency key}: it inserts a row, and relies on a unique index to reject
+a second attempt. Catching that rejection is the mechanism.
+
+But in PostgreSQL, \textbf{a failed statement poisons the whole transaction}.
+After the duplicate-key error, every subsequent statement fails with 25P02 until
+someone rolls back. SQLite does not do this, so locally the code worked
+perfectly.
+
+The real-world effect: a user who double-clicked ``Report incident'' got
+\fpath{500 Internal Server Error} rather than the polite ``you already submitted
+this'' the feature was written to produce.
+
+\textbf{The fix.} Wrap the insert in a nested transaction, which PostgreSQL
+implements as a \emph{savepoint}. The failure then rolls back only to the
+savepoint, and the outer transaction survives.
+
+\where{api/app/Http/Middleware/HandleIdempotency.php}
+\begin{lstlisting}[language=PHP]
+return DB::transaction(fn (): IdempotencyKey => IdempotencyKey::query()->create([...]));
+\end{lstlisting}
+
+\note{One line, and it is not obvious from reading it that it is doing anything.
+Laravel turns a nested \fpath{DB::transaction} into \fpath{SAVEPOINT}, so the
+error is contained. Without the surrounding story, this line looks like it could
+be deleted.}
+
+\warnbox{The general lesson is the one worth carrying: \textbf{a fast local test
+database that is not the production database will hide a class of bugs, and it
+will hide precisely the ones that involve transactional behaviour.} The
+substitute is chosen for speed, and speed usually means fewer guarantees ---
+which is the same thing as fewer failure modes to reproduce.}
+
+\section{The test that proved nothing}
+
+\textbf{Symptom.} A newly-added test passed locally and failed in CI ---
+\emph{different} CI job from the last story, and a different cause.
+
+\textbf{Wrong guess.} The rate limit is too low on CI. Checked the logs for
+\fpath{429} responses: none. The guess was wrong, and checking took two minutes.
+
+\textbf{Evidence.} The environment blocks differ:
+
+\begin{lstlisting}
+phpunit.xml           CACHE_STORE = array     fresh for every test
+CI, PostgreSQL job    CACHE_STORE = redis     shared for the whole run
+\end{lstlisting}
+
+The rate limiter keeps its counters in the cache. Nine authentication requests
+happen in that test file \emph{before} the new test runs. With a per-test cache
+that does not matter. With a shared one, the per-IP budget was nearly spent and
+the first attempt in the new test came back 429 --- failing an assertion about a
+different limit entirely.
+
+\textbf{The fix.} Reset the limiter at the start of the test, so it counts from
+a known state on any driver. Then --- and this is the part that mattered ---
+\textbf{prove the fix}: run the whole suite against a real Redis, with and
+without the change, flushing between runs.
+
+\begin{lstlisting}
+with the reset      OK (114 tests, 547 assertions)
+without the reset   FAILURES! 1  -- the exact CI failure
+\end{lstlisting}
+
+\note{Notice the shape repeating from the previous story. Local uses a
+\emph{more forgiving substitute} --- in-memory SQLite, in-memory cache --- and
+both forgive exactly the thing that breaks elsewhere. Test doubles are chosen for
+speed, and speed almost always means \emph{isolation}; isolation is precisely the
+property the real component lacks.}
+
+\section{The header that was documented and never sent}
+
+\textbf{Symptom.} None. Nothing failed. This was found by writing a test for
+behaviour nobody had tested.
+
+\textbf{Evidence.} The API's own error message for rate limiting read:
+\emph{``Too many requests. Slow down and retry after the period in the
+Retry-After header.''} The header was not being sent.
+
+\textbf{The cause.} The central error renderer rebuilt every response from the
+status code and body alone --- discarding any headers the exception carried. The
+throttler attaches \fpath{Retry-After} and the \fpath{X-RateLimit-*} trio to its
+exception, and all of them were silently dropped.
+
+\textbf{The fix.}
+
+\where{api/app/Exceptions/ApiExceptionRenderer.php}
+\begin{lstlisting}[language=PHP]
+/*
+ * Carry over headers the exception was throwing *with*, not just its
+ * status. The throttler is the case that matters: it raises a 429
+ * carrying Retry-After and the X-RateLimit-* trio, and rebuilding the
+ * response from scratch silently dropped all of them.
+ */
+$headers = $e instanceof HttpExceptionInterface ? $e->getHeaders() : [];
+
+return new JsonResponse($payload, $status, $headers);
+\end{lstlisting}
+
+\warnbox{There was no rate-limiting test at all. The limiters were defined and
+attached, which \emph{reads} as correct --- and nothing proved they refused
+anything. This is the most common kind of hidden defect in a codebase: not code
+that is wrong, but code that is never executed by anything that would notice.}
+
+\section{The failure that turned a success into a 500}
+
+\textbf{Symptom.} During a CI run with a misconfigured Redis, creating an
+incident returned \fpath{500}.
+
+\textbf{The cause.} The incident was written and committed successfully. Then the
+code tried to queue the notification job, Redis was unreachable, the exception
+propagated, and the request returned 500.
+
+So the incident \emph{existed} --- and the reporter was told it had failed. On a
+\fpath{sev1} at 3am, that person now re-reports it.
+
+\textbf{The fix.} Catch it, log it, and leave the row \fpath{pending}.
+
+\where{api/app/Services/Notifications/NotificationDispatcher.php}
+\begin{lstlisting}[language=PHP]
+try {
+    SendIncidentNotification::dispatch($notification->getKey());
+} catch (Throwable $e) {
+    /*
+     * The queue broker is unreachable. This must not propagate.
+     *
+     * By the time we get here the incident and its notification rows
+     * are already committed -- dispatch() runs after the transaction
+     * on purpose. Letting this throw would return 500 for a write
+     * that actually succeeded, telling a reporter their SEV-1 was
+     * not filed when it was.
+     */
+    Log::error('notification.enqueue_failed', [...]);
+}
+\end{lstlisting}
+
+\note{A scheduled command already existed to sweep notifications stuck in
+\fpath{pending}. The safety net had been built --- it was simply unreachable,
+because the failure it was designed to catch killed the request before the row
+could be left in the state it looks for. Building a recovery mechanism and then
+failing loudly instead of entering the state it recovers from is a surprisingly
+common mistake.}

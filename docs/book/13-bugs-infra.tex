@@ -1,0 +1,366 @@
+\chapter{Bugs between the services}
+\label{ch:bugs-infra}
+
+These are the hardest failures in the book. In every one, each service was
+working perfectly and the system still did not.
+
+\section{The dashboard that returned 200 and showed nothing}
+
+This is the best example in the book, because every conventional diagnostic said
+the system was healthy.
+
+\textbf{Symptom.} \fpath{http://localhost:8080/horizon} rendered a blank dark
+rectangle. No error message on the page.
+
+\textbf{What all the usual checks said:}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{6.6cm}p{7.0cm}@{}}
+\toprule
+\textbf{Check} & \textbf{Result} \\
+\midrule
+HTTP status of \fpath{/horizon} & \fpath{200 OK} \\
+Server error logs & clean \\
+Container health checks & all passing \\
+The HTML shell & delivered correctly \\
+\fpath{/horizon/api/stats} & \fpath{200}, valid JSON \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Wrong guess \#1.} The dashboard's JavaScript is missing. Checking
+\fpath{/vendor/horizon/app.js} returned \fpath{200} --- but with
+\fpath{Content-Type: text/html} and a body beginning \fpath{<!doctype html>}.
+That looked like the answer: nginx had no rule for \fpath{/vendor/}, so the
+request fell through to the SPA, which returns \fpath{index.html} for unknown
+paths. The browser asks for JavaScript and receives HTML.
+
+That was a real routing flaw. It was not this bug.
+
+\textbf{Wrong guess \#2.} Publish Horizon's assets to \fpath{public/vendor}.
+Running the command printed: \emph{``Horizon no longer publishes its assets.''}
+Modern Horizon serves them through its own routes, so \fpath{/vendor/horizon/}
+was never the correct URL to begin with.
+
+\textbf{The evidence that ended it.} Open the browser's developer console:
+
+\begin{lstlisting}
+Executing inline script violates the following Content Security Policy
+directive 'script-src 'self''.
+
+Loading the stylesheet 'https://fonts.bunny.net/css?family=figtree'
+violates the following Content Security Policy directive: "style-src 'self'"
+\end{lstlisting}
+
+\textbf{The cause.} The site-wide Content Security Policy is deliberately
+strict:
+
+\where{infra/nginx/default.conf}
+\begin{lstlisting}[language=nginxconf]
+# No CDNs, no external fonts, no inline scripts. The SPA is entirely
+# self-hosted, so the policy can be this tight -- and an incident dashboard
+# should render even when the wider internet is the thing that is broken.
+\end{lstlisting}
+
+That reasoning is correct \emph{for the React app}. Horizon is a third-party
+dashboard that boots from an inline \fpath{<script>}, loads a webfont from an
+external host, and --- discovered one round later --- compiles Vue templates at
+runtime, which requires \fpath{eval}. One policy could not serve both.
+
+\subsection{The fix that did nothing, and why}
+
+The obvious repair is a looser policy scoped to that one location:
+
+\begin{lstlisting}[language=nginxconf]
+location /horizon {
+    add_header Content-Security-Policy "... 'unsafe-inline' ..." always;
+    try_files $uri /index.php?$query_string;
+}
+\end{lstlisting}
+
+It had no effect whatsoever. The response still carried the strict policy.
+
+\note{Here is why, and it is a genuinely subtle piece of nginx behaviour.
+\fpath{try\_files \$uri /index.php} performs an \textbf{internal redirect}: nginx
+stops processing this location and starts again in the location that handles
+\fpath{index.php}. Response headers come from whichever location \emph{finally}
+handles the request --- so the \fpath{add\_header} in \fpath{/horizon} never
+applied. Worse, \fpath{\$uri} is rewritten by that redirect and becomes
+\fpath{/index.php}, so testing on \fpath{\$uri} would not work either.
+\fpath{\$request\_uri} keeps the original path.}
+
+\textbf{The fix.} Choose the policy with a \fpath{map} on \fpath{\$request\_uri},
+and emit it once at server level.
+
+\where{infra/nginx/default.conf}
+\begin{lstlisting}[language=nginxconf]
+map $request_uri $incidentflow_csp {
+    default    "default-src 'self'; script-src 'self'; ...";
+    ~^/horizon "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; ...";
+}
+\end{lstlisting}
+
+\shot{14-horizon-dashboard.png}{Horizon after the fix. ``Jobs Per Minute'',
+``Failed Jobs Past 7 Days'' --- the queue is finally visible.}
+
+\warnbox{The relaxation is real, and the config says so rather than pretending
+otherwise. \fpath{unsafe-inline} plus \fpath{unsafe-eval} is a meaningful
+weakening. It is accepted because it is scoped to an authenticated operator
+path, it cannot reach the application, and the alternative was having no queue
+visibility at all. Write down what a compromise costs; a comment that only
+records the benefit is marketing.}
+
+\subsection{The lesson}
+
+Every server-side signal said healthy. The only evidence existed in the
+browser, in a console nobody had opened. \textbf{A class of failure exists that
+your server can neither detect nor log}, because the rejection happens on the
+other machine --- and a policy failure is exactly that class: nothing is broken,
+everything behaves as specified, and the specification forbids the thing you
+needed.
+
+\section{The 502 that appeared while nothing changed}
+
+\textbf{Symptom.} The application had been working. Later, every API request
+through nginx returned \fpath{502 Bad Gateway}. No deploy, no code change.
+
+\textbf{Wrong guess.} PHP-FPM has died or is listening on the wrong interface.
+Checking inside the container showed it listening on \fpath{:::9000} and alive.
+
+\textbf{Evidence.} The container uptimes:
+
+\begin{lstlisting}
+nginx    Up 4 hours
+api      Up 3 hours
+\end{lstlisting}
+
+The API restarted \emph{after} nginx started.
+
+\textbf{The cause.} nginx resolves the hostnames in an \fpath{upstream} block
+\textbf{once, at startup}, and caches the address. The API container restarted
+and Docker gave it a new IP. nginx was still dialling the old one.
+
+\textbf{The fix.} \fpath{docker compose restart nginx} --- and understanding that
+this will recur every time the API restarts alone.
+
+\note{The same class of bug appears in the deployment configuration, where
+upstreams are declared with a resolver and re-resolved at request time
+specifically so a redeploy of one service does not leave the edge pointing at a
+dead address. Recognising a bug you have already met, in a different disguise, is
+most of what experience is.}
+
+\section{The health check that lied}
+
+\textbf{Symptom.} CI failed intermittently: \fpath{migrate didn't complete
+successfully: exit 1}, while PostgreSQL reported \textbf{healthy}. Roughly one
+run in two.
+
+\textbf{Evidence.} Sampling both forms of the readiness probe on a fresh
+database, every 0.3 seconds:
+
+\begin{lstlisting}
+t=00.0s   socket(no -h): --     tcp(-h 127.0.0.1): --
+t=01.8s   socket(no -h): UP     tcp(-h 127.0.0.1): --      <-- healthy, nothing listening
+t=02.1s   socket(no -h): --     tcp(-h 127.0.0.1): --
+t=03.3s   socket(no -h): UP     tcp(-h 127.0.0.1): UP
+\end{lstlisting}
+
+\textbf{The cause.} The check was \fpath{pg\_isready -U incidentflow -d
+incidentflow}. With no \fpath{-h}, \fpath{pg\_isready} connects over the
+\textbf{Unix socket}. The official Postgres image runs its initialisation phase
+on a temporary server started with \fpath{listen\_addresses=''} --- socket only,
+no TCP. So the probe succeeds mid-initialisation, the container is marked
+healthy, and everything waiting on it is released against a port that accepts
+nothing.
+
+There was even a comment claiming the check tested a real connection by naming
+the user and database. It does not: \fpath{pg\_isready} never opens a database
+connection, it asks the postmaster whether it is accepting them.
+
+\textbf{The fix.} \fpath{pg\_isready -h 127.0.0.1 -U incidentflow -d
+incidentflow}.
+
+\warnbox{The general rule: \textbf{a readiness probe must use the same transport
+as the client it gates.} Probing a Unix socket to certify TCP readiness tests a
+different thing from the one that matters --- and the two diverge exactly during
+startup, which is the only window the probe exists for.}
+
+\section{Three smaller ones, quickly}
+
+\subsection{A clean exit treated as a failure}
+
+\fpath{docker compose up --wait} returned 1 with \fpath{migrate Exited (0)}. The
+migration container does its job and stops, and \fpath{--wait} counted a stopped
+container as a failure. The fix is \fpath{condition:
+service\_completed\_successfully}, which also made \fpath{api}, \fpath{horizon}
+and \fpath{scheduler} wait for the schema to exist --- something they had never
+actually been told to do.
+
+\subsection{Workers permanently unhealthy}
+
+\fpath{horizon} and \fpath{scheduler} inherited the API image's health check,
+which probes php-fpm on port 9000. Neither runs php-fpm. Both sat marked
+unhealthy while working perfectly --- Horizon was visibly processing jobs while
+reporting itself broken. Disabling an inherited check that describes a different
+process is the fix.
+
+\subsection{The second `up' that destroyed the stack}
+
+Running \fpath{docker compose up} a second time, without removing volumes,
+aborted everything: the seeder re-inserted blindly and hit a unique constraint,
+and because the other services had (correctly) been made to wait for the
+migration to \emph{succeed}, its failure took the whole stack down.
+
+Demo data already existing is the normal state on a re-run, not an error:
+
+\where{api/database/seeders/DatabaseSeeder.php}
+\begin{lstlisting}[language=PHP]
+if (Organization::query()->exists()) {
+    $this->command?->info('Demo data is already present; nothing to seed.');
+
+    return;
+}
+\end{lstlisting}
+
+\note{Notice the interaction. Making dependencies stricter was correct, and it
+converted a previously harmless failure into a total outage. Tightening one part
+of a system can promote an existing minor fault into a major one --- which is an
+argument for tightening things, not against it: the fault was always there.}
+
+\chapter{Bugs that only appear when deploying}
+\label{ch:bugs-deploy}
+
+\section{The cookie that is never sent}
+
+\textbf{Symptom (predicted, not suffered).} Deployed over plain HTTP, sign-in
+appears to work and the session dies roughly fifteen minutes later. Nothing
+errors. Nothing is logged.
+
+\textbf{The cause.} The production configuration sets
+\fpath{JWT\_REFRESH\_COOKIE\_SECURE=true}. A \fpath{Secure} cookie is only ever
+sent back over HTTPS. Over plain HTTP the browser accepts it and then never
+returns it --- so the first refresh, when the fifteen-minute access token
+expires, has no credential.
+
+Every component behaves exactly as specified. The API sets the cookie correctly.
+The browser stores it correctly. It is simply never transmitted.
+
+\warnbox{This is why the deployment guide treats TLS as mandatory rather than a
+finishing touch. ``It works on HTTP, I will add HTTPS later'' produces an
+application that appears to work and logs people out fifteen minutes later, in a
+different component, with no error anywhere.}
+
+\section{Three containers, three different signing keys}
+
+\textbf{The setting.} Moving from Docker Compose to a platform that gives each
+container its own filesystem.
+
+\textbf{The cause.} In Compose, \fpath{api}, \fpath{horizon} and
+\fpath{scheduler} share one volume holding the JWT key pair. On a platform
+without shared volumes, each container generates its \emph{own} pair at startup.
+A token signed by one then fails verification in another.
+
+The symptom would be intermittent, inexplicable ``invalid signature'' errors
+depending on which container answered.
+
+\textbf{The fix.} Inject the key as an environment variable rather than
+generating it. The configuration already supported this:
+
+\where{api/config/jwt.php}
+\begin{lstlisting}[language=PHP]
+'private_key' => env('JWT_PRIVATE_KEY'),
+'private_key_path' => env('JWT_PRIVATE_KEY_PATH', storage_path('keys/jwt-private.pem')),
+\end{lstlisting}
+
+\note{This is the shape of nearly every compose-to-platform port. The bug is not
+in your code --- the code is correct. It is that a \emph{shared volume} is an
+ambient guarantee Compose provides in one line and the platform silently removes.
+The same is true of a flat IPv4 network and of \fpath{depends\_on} ordering. Each
+has to become explicit configuration or it becomes a runtime mystery.}
+
+\section{A hostname that resolves and still cannot be reached}
+
+\textbf{The cause.} One platform's private DNS resolves service names to
+\textbf{IPv6 only}. The API's nginx listened with \fpath{listen \$\{PORT\};},
+which binds IPv4 alone. The hostname resolved perfectly; nothing could connect.
+
+\textbf{The fix.} Bind both stacks.
+
+\where{api/docker/render-nginx.conf.template}
+\begin{lstlisting}[language=nginxconf]
+listen ${PORT};
+# Dual-stack. Railway's private DNS (*.railway.internal) resolves to IPv6
+# only, so an IPv4-only listener is unreachable from a sibling service
+# however correct the hostname is. Harmless on Render, required here.
+listen [::]:${PORT};
+\end{lstlisting}
+
+\warnbox{Verifying this needed care. \fpath{nginx -t} only checks
+\emph{syntax} --- a configuration that cannot bind still passes. The check that
+matters is starting it and confirming both sockets are actually listening and
+serving. A test that validates a file is not a test that validates a program.}
+
+\section{A message that was a count, not a diagnosis}
+
+\textbf{Symptom.} A container refused to start, reporting: \emph{database
+unreachable after 30 attempts}.
+
+That sentence contains no information. It cannot distinguish an unresolvable
+hostname from a refused connection from a rejected password --- three completely
+different problems with three completely different fixes. The probe had the real
+error and threw it away:
+
+\begin{lstlisting}[language=bash]
+until php -r "new PDO(...);" 2>/dev/null; do
+\end{lstlisting}
+
+That \fpath{2>/dev/null} discarded the driver's message on every one of the
+thirty attempts.
+
+\textbf{The fix.} Keep the last error and report it.
+
+\begin{lstlisting}[language=bash]
+until db_error="$(php -r "new PDO(...);" 2>&1)"; do
+  ...
+  # Report what the driver actually said. "unreachable after 30 attempts" is
+  # a count, not a diagnosis.
+  echo "{\"level\":\"fatal\",\"message\":\"database unreachable\",\"last_error\":\"${detail}\"}" >&2
+\end{lstlisting}
+
+The two failure modes it had been conflating, now distinguishable:
+
+\begin{lstlisting}
+could not translate host name "nosuchhost" to address: Name does not resolve
+connection to server at "postgres" failed: FATAL: password authentication failed
+\end{lstlisting}
+
+\note{Suppressing stderr in a retry loop is extremely common --- it keeps the
+logs tidy while the loop retries. It also means that when the loop finally gives
+up, the one moment you need the reason, it has been discarded thirty times over.
+Keep the last error even when you discard the rest.}
+
+\section{Two mistakes of mine, for completeness}
+
+\subsection{The tool that reported success without running}
+
+A formatting check reported ``passed'' every single time, locally --- because a
+hook intercepted the command and returned a canned success. Every local ``lint
+is clean'' was meaningless, and CI kept failing on formatting.
+
+\warnbox{The lesson generalises well beyond this project: \textbf{a check that
+cannot fail is not a check.} If you have never seen a tool report a failure, you
+do not know it is running. Break something on purpose and confirm it complains.}
+
+\subsection{The document that destroyed itself}
+
+The first attempt at writing this book generated the LaTeX through a shell
+heredoc. Every \fpath{\textbackslash\textbackslash} collapsed into a single
+backslash. LaTeX builds table rows and line breaks out of
+\fpath{\textbackslash\textbackslash}, so every table in the document was
+silently destroyed --- and the error it produced pointed at a title line that
+looked perfectly correct.
+
+\note{Both of these share a shape with the screenshot bug in
+Chapter~\ref{ch:bugs-frontend}: a tool reported success while producing wrong
+output. That is the failure mode worth fearing most, because every instinct you
+have says to trust it.}

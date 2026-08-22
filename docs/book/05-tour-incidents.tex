@@ -1,0 +1,126 @@
+\chapter{The incidents list}
+\label{ch:incidents}
+
+\shot{05-incidents-list.png}{The incidents list, signed in as an incident
+commander. This is the screen people leave open all day.}
+
+\section{Reading the screen}
+
+Seven columns, and each answers a question an on-call engineer actually asks.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.4cm}p{9.3cm}@{}}
+\toprule
+\textbf{Column} & \textbf{The question it answers} \\
+\midrule
+Reference & ``Which incident are we talking about?'' A short stable code you can say out loud on a call. \\
+Severity & ``How bad?'' \\
+Status & ``Is anyone on it?'' \\
+Title & ``What is it?'' \\
+Service & ``What is affected?'' \\
+Opened & ``When did this start?'' \\
+Running / resolved in & ``How long has this been going on --- or how long did it take?'' \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{That last column changes meaning depending on the row. For a live incident
+it counts up; for a finished one it is a fixed duration. One column, two
+meanings, and it works because you always want the same thing: elapsed time that
+matters right now.}
+
+\section{The button that is not always there}
+
+\where{web/src/pages/IncidentsPage.tsx}
+\begin{lstlisting}[language=tsx]
+{can('incident.create') && (
+  <button
+    type="button"
+    onClick={() => setCreating(true)}
+    className="btn btn-primary"
+  >
+    <Plus className="h-4 w-4" aria-hidden="true" />
+    Report incident
+  </button>
+)}
+\end{lstlisting}
+
+That \fpath{\&\&} is JavaScript's short-circuit: if \fpath{can('incident.create')}
+is false, the expression evaluates to false and React renders nothing. The
+button does not appear disabled --- it does not exist.
+
+Compare the same screen seen by a viewer:
+
+\shot{11-incidents-as-viewer.png}{The identical page, signed in as Sofia Rossi,
+a viewer. The ``Report incident'' button is gone. So is ``Export CSV''.}
+
+\warnbox{This is presentation only. A viewer who opens the browser console and
+sends \fpath{POST /api/v1/incidents} directly is not stopped by a missing
+button, because the button was never the control. The API refuses the request
+using a policy on the server. Hiding it is politeness --- it keeps people from
+attempting things they cannot do. Chapter~\ref{ch:roles} shows both halves side
+by side.}
+
+\section{Where \fpath{can()} comes from}
+
+The frontend is told, at sign-in, exactly what this user may do. It does not
+guess from the role name --- it receives a list of permission strings and checks
+membership. That matters: the mapping from role to permissions lives in the API,
+in one place, and the frontend never has a second copy of it that could drift.
+
+\section{Every badge is an enum}
+
+\where{web/src/pages/IncidentsPage.tsx}
+\begin{lstlisting}[language=tsx]
+<td className="px-3 py-2">
+  <SeverityBadge severity={incident.severity.value} label={incident.severity.label} />
+</td>
+<td className="px-3 py-2">
+  <StatusBadge status={incident.status.value} label={incident.status.label} />
+</td>
+\end{lstlisting}
+
+Notice the API sends \emph{both} \fpath{value} and \fpath{label}: the machine
+form (\fpath{sev1}) and the human form (\fpath{Critical}). The badge colours
+itself from \fpath{value} and prints \fpath{label}.
+
+\note{The alternative --- sending only \fpath{sev1} and having the frontend hold
+a lookup table of display names --- means two copies of the same knowledge. Add
+a severity level and you must remember to update the other side. Sending both
+means the API stays the single source of truth for what its own values mean.}
+
+\section{The colour rule this whole design follows}
+
+\where{web/src/index.css}
+\begin{lstlisting}
+/* red means severity ... So the brand itself is deliberately not red. */
+\end{lstlisting}
+
+In an incident tool, red already has a job: it means \emph{this is bad}. If the
+brand colour were also red, every page would be permanently alarming and a real
+\fpath{sev1} would not stand out. So the brand is indigo, and red is reserved
+for severity alone.
+
+That single rule explains the entire palette --- and it is the sort of decision
+that is obvious in hindsight and invisible unless someone writes it down.
+
+\section{Filtering, and why the URL changes}
+
+The filter bar above the table --- search, severity, status, service --- writes
+its state into the page's URL. That is why you can copy the address of
+``all open sev1 incidents on the payments service'' and send it to a colleague,
+and why the browser Back button steps through your filters.
+
+\note{Storing view state in the URL rather than in a variable is a small amount
+of extra work that turns a screen into something shareable. On an incident call,
+pasting a link is faster than describing which dropdowns to set.}
+
+\section{Check your understanding}
+
+\begin{itemize}[leftmargin=1.4cm]
+\cbox Why does the API send both \fpath{value} and \fpath{label} for a severity?
+\cbox A viewer cannot see ``Report incident''. What actually stops them creating
+  an incident?
+\cbox Why is the brand colour not red?
+\cbox What is gained by putting filter state in the URL?
+\end{itemize}

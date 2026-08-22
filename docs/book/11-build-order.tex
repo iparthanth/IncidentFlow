@@ -1,0 +1,178 @@
+\part{Building it from nothing}
+
+\noindent\textbf{\large What this part covers}
+
+\medskip
+\noindent
+The order the pieces have to be built in, and why that order is forced rather
+than chosen. If you set out to rebuild this project by hand, this is the
+sequence --- and skipping ahead in it produces work you have to throw away.
+
+\chapter{The order, and why it is not arbitrary}
+\label{ch:buildorder}
+
+\section{The principle}
+
+Build \textbf{inward-out}: the things that cannot change first, the things that
+change constantly last.
+
+\begin{center}
+\begin{tabular}{@{}rp{5.0cm}p{6.6cm}@{}}
+\toprule
+& \textbf{Stage} & \textbf{Why here} \\
+\midrule
+1 & The database schema & Everything else refers to it. Getting it wrong later means migrations, data rewrites and edits everywhere. \\
+2 & Enums and models & The vocabulary. Once \fpath{IncidentStatus} exists, every later file can use it. \\
+3 & Authentication & Nothing else can be built until you can say who is asking. \\
+4 & Permissions & Every endpoint needs to ask ``may they?'' before it exists. \\
+5 & Services (the logic) & The actual rules, testable with no HTTP involved. \\
+6 & Controllers and routes & A thin shell over the above. \\
+7 & The realtime service & Needs events to exist before it can forward them. \\
+8 & The frontend & Needs an API to talk to. \\
+9 & Docker and nginx & Wires together things that already work individually. \\
+10 & CI and deployment & Automates a build you can already do by hand. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{The temptation is always to build the screen first, because a screen is
+visible and a migration is not. It is a false economy: a screen built against an
+API that does not exist is built against your \emph{guess} at that API, and the
+guess is usually wrong in ways that are invisible until integration.}
+
+\section{Stage 1: the schema}
+
+Eight migrations, and their numeric prefixes are the order they run in.
+
+\begin{lstlisting}
+2026_01_01_000100_...   organizations and users
+2026_01_01_000200_...   membership: who belongs to which organisation
+2026_01_01_000300_create_incidents_table.php
+2026_01_01_000400_create_incident_activity_tables.php
+...
+\end{lstlisting}
+
+\warnbox{The order is forced by foreign keys. \fpath{incidents} has an
+\fpath{organization\_id} that must point at a real organisation, so
+\fpath{organizations} has to exist first. Get the numbering wrong and the
+migration fails --- immediately and clearly, which is the good case. The bad
+case is a schema that lets a row point at nothing.}
+
+Design decisions that had to be made at this stage, because changing them later
+is expensive:
+
+\begin{itemize}[leftmargin=1.4cm]
+\item \fpath{incident\_events} has no \fpath{updated\_at} and no
+  \fpath{deleted\_at}. There is nowhere for an edit to be recorded, because
+  edits are not permitted. The schema states the intent before any code enforces
+  it.
+\item \fpath{time\_to\_acknowledge\_seconds} lives on the incident row rather
+  than being computed from the timeline. Chapter~\ref{ch:screens} explains why
+  that is safe.
+\item Idempotency keys have a unique index. That index \emph{is} the mechanism
+  --- see Chapter~\ref{ch:bugs-backend}.
+\end{itemize}
+
+\section{Stage 2: enums before models}
+
+Write \fpath{IncidentStatus} and \fpath{IncidentSeverity} before
+\fpath{Incident}. The model then declares its columns \emph{as} those types, and
+from that moment on it is impossible to assign an invalid status anywhere in the
+codebase --- PHP refuses.
+
+\note{This is why the transition rule lives on the enum rather than in a service.
+The enum is the one thing every other layer already depends on, so a rule placed
+there is unavoidable. A rule in a service can be bypassed by not calling that
+service.}
+
+\section{Stage 3: authentication, and the shape of the key}
+
+Authentication had to be built before anything it protects. The decision made
+here that shaped the rest of the system: \textbf{RS256, not HS256}.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.6cm}>{\raggedright\arraybackslash}p{4.6cm}p{6.4cm}@{}}
+\toprule
+& \textbf{HS256} & \textbf{RS256} \\
+\midrule
+Key & One shared secret & A private key and a public key \\
+To verify & You need the secret & You need only the public key \\
+Consequence & Anyone who can verify can also forge & Verifying and signing are separate powers \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The realtime service must verify tokens. With HS256 it would need the signing
+secret, and a compromise of the most exposed service would hand over the ability
+to mint tokens for anyone. With RS256 it holds only the public half.
+
+\warnbox{This choice creates an operational requirement that catches people
+during deployment: \emph{all three} PHP containers must have the same private
+key. In Docker Compose they share a volume, so it happens automatically. On a
+platform that gives each container its own filesystem, each would generate a
+different key and tokens minted by one would fail verification in another. The
+symptom is intermittent, inexplicable ``invalid signature'' errors.
+Chapter~\ref{ch:bugs-deploy}.}
+
+\section{Stage 5: the logic, before any HTTP}
+
+The most important file in the project is \fpath{IncidentService}, and it knows
+nothing about HTTP. It does not see requests or return responses. That is what
+makes the rules testable without a browser, a server, or a network.
+
+The pattern it follows appears throughout:
+
+\begin{enumerate}[leftmargin=1.5cm]
+\item Check the rules.
+\item Open a transaction.
+\item Write everything --- the change, the timeline entry, the notification rows.
+\item Commit.
+\item \emph{Then} queue jobs and publish events.
+\end{enumerate}
+
+\note{Steps 4 and 5 are in that order for a reason given in
+Chapter~\ref{ch:arch}, and the project has a dedicated class ---
+\fpath{PendingEffects} --- whose entire job is to hold the side effects until
+the transaction has committed. When a codebase grows a class to enforce an
+ordering, it is usually because getting it wrong once was expensive.}
+
+\section{Stage 9: Docker last, not first}
+
+Docker is written when the pieces already work. It is a way of \emph{running}
+software, not a way of writing it.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.0cm}p{9.6cm}@{}}
+\toprule
+\textbf{File} & \textbf{Written when} \\
+\midrule
+\fpath{api/Dockerfile} & The API runs and its tests pass. \\
+\fpath{web/Dockerfile} & The frontend builds and talks to the API. \\
+\fpath{docker-compose.yml} & Every service works individually. \\
+\fpath{infra/nginx/} & There is more than one service to route between. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warnbox{Writing the compose file first is a common instinct and a trap: you end
+up debugging container networking and application logic simultaneously, unable
+to tell which layer a failure came from. Get each piece working on its own, then
+wire them together --- so that when something breaks, only one thing changed.}
+
+\section{Stage 10: what CI actually protects}
+
+The pipeline runs the tests, the linters, a security audit of dependencies, a
+container vulnerability scan, and then starts the entire stack and runs the
+browser tests against it.
+
+That last step is the expensive one and the one that has caught the most. Every
+bug in Chapter~\ref{ch:bugs-infra} lived in the gaps \emph{between} services,
+where no unit test could reach --- and several of them were found only because CI
+insisted on starting the whole system from nothing, on a machine with no
+leftover state.
+
+\note{This is the deepest lesson in the book. Local development accumulates
+state: containers that were already running, a database that was already seeded,
+a key that was already generated. CI has none of that, every single time. A
+system that only works on a machine with history is not a working system --- it
+just has not been asked to prove itself yet.}

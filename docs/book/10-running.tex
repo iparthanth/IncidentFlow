@@ -1,0 +1,270 @@
+\part{Running it}
+
+\noindent\textbf{\large What this part covers}
+
+\medskip
+\noindent
+Everything needed to take this project from a folder on disk to a working
+application, assuming you know how to open a folder in VS Code and nothing more.
+Every command is given in full, with what it does, where you must be standing
+when you type it, and what you should see afterwards.
+
+\medskip
+\noindent
+It also answers the question people are usually too embarrassed to ask: how many
+separate things are running, and how do they find each other?
+
+\chapter{From nothing to running}
+\label{ch:running}
+
+\section{What you need installed}
+
+Exactly one thing.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.0cm}p{9.6cm}@{}}
+\toprule
+\textbf{Tool} & \textbf{Why} \\
+\midrule
+Docker Desktop & Runs all nine containers. Includes \fpath{docker compose}. \\
+Git & To obtain the code. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{You do \textbf{not} need PHP, Node.js, PostgreSQL or Redis installed. That
+is the entire point of Docker, and it is worth pausing on: installing PHP 8.3
+with the \fpath{pdo\_pgsql} extension compiled against PostgreSQL headers is
+genuinely unpleasant on Windows. Docker does it once, inside an image, on every
+machine identically.}
+
+\section{The three commands that start everything}
+
+Open a terminal. On Windows, press Start, type \fpath{powershell}, press Enter.
+
+\begin{lstlisting}[language=bash]
+cd D:\IncidentFlow
+docker compose up -d --build
+\end{lstlisting}
+
+\begin{description}[leftmargin=1.4cm,style=nextline]
+\item[\fpath{up}] create and start the containers
+\item[\fpath{-d}] detached --- run in the background and give the prompt back
+\item[\fpath{--build}] build the images from source first, rather than reusing
+  whatever was built last
+\end{description}
+
+The first run takes several minutes: it downloads base images and compiles PHP
+extensions. Later runs take seconds.
+
+\begin{lstlisting}[language=bash]
+docker compose ps
+\end{lstlisting}
+
+\expect{Nine rows. \fpath{postgres}, \fpath{redis}, \fpath{mailpit},
+\fpath{api}, \fpath{realtime}, \fpath{web}, \fpath{nginx} should say
+\fpath{healthy}. \fpath{horizon} and \fpath{scheduler} say only \fpath{Up} ---
+they have no HTTP port to check, which is correct and not a fault.}
+
+Then load the database:
+
+\begin{lstlisting}[language=bash]
+docker compose run --rm migrate
+\end{lstlisting}
+
+\expect{A list of migrations, each ending \fpath{DONE}, then seeding output
+ending with \emph{``Demo accounts seeded. Password for all of them:
+incidentflow''}.}
+
+Now open \fpath{http://localhost:8080}.
+
+\warnbox{If you see the page but signing in fails, the API is not reachable
+through nginx even though both containers are ``up''. Run \fpath{curl
+http://localhost:8080/api/v1/health/ready}. A \fpath{502} means nginx cannot
+reach the API --- see Chapter~\ref{ch:bugs-infra}, where exactly this happened
+and the cause was not what it appeared to be.}
+
+\section{Shorter names for the same commands}
+
+\fpath{Makefile} at the project root defines aliases. \fpath{make up} is
+\fpath{docker compose up --build}, and so on.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.2cm}p{10.4cm}@{}}
+\toprule
+\textbf{Command} & \textbf{What it does} \\
+\midrule
+\fpath{make up} & Build and start the whole stack. \\
+\fpath{make down} & Stop everything \textbf{and remove the volumes}. \\
+\fpath{make logs} & Follow every service's output. \\
+\fpath{make shell} & Open a shell inside the API container. \\
+\fpath{make migrate} & Apply pending migrations. \\
+\fpath{make seed} & Load the demo organisation and 90 days of history. \\
+\fpath{make fresh} & Drop everything and rebuild the schema with demo data. \\
+\fpath{make test} & Run all three test suites. \\
+\fpath{make lint} & Formatting and static checks across all three projects. \\
+\fpath{make keys} & Generate a new RS256 key pair. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warnbox{\fpath{make down} removes the volumes. That deletes the database ---
+every incident, every timeline entry, every user. It is the right behaviour for
+a development alias you use to get back to a clean state, and it is a disaster
+if you type it on a server. Chapter~\ref{ch:bugs-infra} includes the day this
+distinction stopped being theoretical.}
+
+\warnbox{\fpath{make keys} signs every user out immediately, everywhere. The
+tokens they hold were signed with the old key and will no longer verify. That is
+correct --- it is how you respond to a leaked key --- but it is not something to
+run casually.}
+
+\section{Which command runs where}
+
+This trips up nearly everyone at first. There are three different places a
+command can be typed, and typing one in the wrong place produces confusing
+errors.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.6cm}>{\raggedright\arraybackslash}p{4.0cm}p{5.0cm}@{}}
+\toprule
+\textbf{Command starts with} & \textbf{Runs} & \textbf{From where} \\
+\midrule
+\fpath{docker compose ...} & on your machine & \fpath{D:\textbackslash IncidentFlow} \\
+\fpath{docker compose exec api ...} & inside the API container & anywhere in the project \\
+\fpath{npm ...} & on your machine & \fpath{web/} or \fpath{realtime/} \\
+\fpath{php artisan ...} & inside the API container & prefix it with \fpath{docker compose exec api} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{\fpath{php artisan} is the one that catches people. Typing it directly in
+PowerShell fails, because PHP is not installed on your machine --- it is inside
+the container. Every \fpath{artisan} command in this book is written with its
+\fpath{docker compose exec api} prefix for that reason.}
+
+\section{How the nine containers find each other}
+
+Inside Docker, \textbf{the service name is the hostname}. When the API connects
+to the database it uses the host \fpath{postgres} --- not an IP address, not
+\fpath{localhost}.
+
+\where{docker-compose.yml}
+\begin{lstlisting}[language=yamlx]
+DB_HOST: postgres
+REDIS_HOST: redis
+\end{lstlisting}
+
+Docker runs a small DNS server on the container network; \fpath{postgres}
+resolves to whatever address that container currently has.
+
+\warnbox{``Whatever address it currently has'' is the important half. Restart a
+container and it may get a different one. Anything that resolved the old address
+and cached it is now talking to nothing --- which is precisely how this project's
+nginx started returning 502 while every container reported healthy.
+Chapter~\ref{ch:bugs-infra}.}
+
+\subsection{The complete connection map}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.6cm}>{\raggedright\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}p{2.0cm}p{5.6cm}@{}}
+\toprule
+\textbf{From} & \textbf{To} & \textbf{Port} & \textbf{Carrying} \\
+\midrule
+your browser & nginx & 8080 & everything \\
+nginx & web & 80 & the React files \\
+nginx & api & 9000 & FastCGI (not HTTP) \\
+nginx & realtime & 3001 & the live stream \\
+api & postgres & 5432 & SQL \\
+api & redis & 6379 & jobs and events \\
+horizon & redis & 6379 & taking jobs off the queue \\
+horizon & postgres & 5432 & reading what to send \\
+horizon & mailpit & 1025 & SMTP \\
+scheduler & redis & 6379 & queueing timed work \\
+realtime & redis & 6379 & subscribing to events \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{Only the first row crosses the boundary of your machine. Everything else
+happens on a private network Docker creates, which is why \fpath{api} has no
+published port and cannot be reached from your browser at all.}
+
+\section{Watching it work}
+
+\begin{lstlisting}[language=bash]
+docker compose logs -f api
+docker compose logs -f horizon
+docker compose logs --tail 50 nginx
+\end{lstlisting}
+
+\fpath{-f} follows --- new lines appear as they happen. Press Ctrl+C to stop
+watching; that stops the \emph{watching}, not the container.
+
+\subsection{Getting inside a container}
+
+\begin{lstlisting}[language=bash]
+docker compose exec api sh
+\end{lstlisting}
+
+You are now in a shell inside the API container. \fpath{php artisan} works here
+without a prefix, because this is where PHP lives. Type \fpath{exit} to leave.
+
+\begin{lstlisting}[language=bash]
+docker compose exec postgres psql -U incidentflow -d incidentflow
+\end{lstlisting}
+
+That opens the PostgreSQL client. Try \fpath{\textbackslash dt} to list tables,
+\fpath{select count(*) from incidents;} to count rows, and
+\fpath{\textbackslash q} to quit.
+
+\expect{\fpath{\textbackslash dt} lists about a dozen tables including
+\fpath{incidents}, \fpath{incident\_events}, \fpath{users} and
+\fpath{audit\_logs}. The incident count on a freshly seeded database is 17.}
+
+\section{Stopping, and the difference that matters}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.4cm}p{8.2cm}@{}}
+\toprule
+\textbf{Command} & \textbf{Effect} \\
+\midrule
+\fpath{docker compose stop} & Stops the containers. Data kept. Start again with \fpath{start}. \\
+\fpath{docker compose down} & Stops and removes the containers. \textbf{Data kept} --- volumes survive. \\
+\fpath{docker compose down -v} & Stops, removes, \textbf{and deletes the volumes}. Everything is gone. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warnbox{That \fpath{-v} is the single most dangerous character in this book. On
+your laptop it means ``give me a clean database''. On a server it means ``delete
+the incident history permanently''. There is no confirmation prompt and no undo.}
+
+\section{Running the tests}
+
+\begin{lstlisting}[language=bash]
+docker compose exec api php vendor/bin/phpunit
+\end{lstlisting}
+
+\expect{\fpath{OK (114 tests, 547 assertions)}, in about fifteen seconds.}
+
+The browser tests are different --- they drive a real browser against the running
+stack:
+
+\begin{lstlisting}[language=bash]
+cd web
+npm install
+npx playwright install chromium
+npm run e2e
+\end{lstlisting}
+
+\expect{\fpath{7 passed}. These require the stack to be running, because they
+are not simulating anything --- they open a real browser and sign in.}
+
+\note{The two suites test genuinely different things. The PHPUnit tests check
+that each piece is correct in isolation. The Playwright tests check the
+\emph{seams}: that nginx does not buffer the live stream into silence, that the
+refresh cookie survives a reload, that the realtime service is subscribed to the
+channel the publisher actually writes to. Every failure they are designed to
+catch has the same shape --- every service works perfectly on its own and the
+system still does not.}

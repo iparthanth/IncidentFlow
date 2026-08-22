@@ -68,6 +68,15 @@
 \titleformat{\section}{\Large\bfseries\color{ink}}{\thesection}{0.6em}{}
 \titleformat{\subsection}{\large\bfseries\color{ink}}{\thesubsection}{0.6em}{}
 
+% The book class ejects the page immediately after a \part title, so anything
+% written after \part{...} lands on the following page and the divider is left
+% holding four words. Emptying \@endpart keeps the part's introduction on the
+% part page. The next \chapter starts a fresh page on its own, so nothing else
+% needs to change.
+\makeatletter
+\renewcommand\@endpart{}
+\makeatother
+
 % --- Code listings ---------------------------------------------------------
 \lstdefinestyle{base}{
   basicstyle=\ttfamily\footnotesize,
@@ -142,5 +151,15 @@ and nothing more. No Laravel, React, Docker or SQL assumed.}\\[0.4cm]
 \input{01-what-it-is}
 \input{02-architecture}
 \input{03-files}
+\input{04-tour-login}
+\input{05-tour-incidents}
+\input{06-tour-detail}
+\input{07-tour-screens}
+\input{08-tour-roles}
+\input{09-tour-operator}
+\input{10-running}
+\input{11-build-order}
+\input{12-bugs-app}
+\input{13-bugs-infra}
 
 \end{document}

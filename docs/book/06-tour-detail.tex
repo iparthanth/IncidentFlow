@@ -1,0 +1,162 @@
+\chapter{The incident detail page and its timeline}
+\label{ch:detail}
+
+\shot{06-incident-detail.png}{One incident, open. The timeline runs down the
+page; the controls for changing it sit alongside.}
+
+This is the most important screen in the application. Everything else exists to
+get you here or to summarise what happened here.
+
+\section{The timeline is the product}
+
+Everything that has ever happened to this incident appears as an entry: it was
+opened, someone acknowledged it, severity was raised, a note was posted, it was
+mitigated, it was resolved.
+
+\where{web/src/components/Timeline.tsx}
+\begin{lstlisting}[language=tsx]
+{events.map((event) => {
+  const { relative, absolute } = formatTimestamp(event.occurred_at);
+  return (
+    <li key={event.id} className="relative">
+      <span className={dotColour(event.type)} />
+      <p className="text-sm text-slate-800 dark:text-slate-200">{event.summary}</p>
+      <time dateTime={event.occurred_at ?? undefined}>{relative}</time>
+      {typeof event.payload.note === 'string' && event.payload.note.length > 0 && (
+        <p>{event.payload.note}</p>
+      )}
+      {event.request_id && (
+        <span>{event.request_id}</span>
+      )}
+    </li>
+  );
+})}
+\end{lstlisting}
+
+Two details repay attention.
+
+\begin{description}[leftmargin=1.2cm,style=nextline]
+\item[Both time formats] \fpath{relative} shows ``12 minutes ago'', which is what
+  you want during an incident. \fpath{dateTime} carries the exact machine
+  timestamp, which is what you want when writing the postmortem. The
+  \fpath{<time>} element is the HTML built for exactly this.
+\item[\fpath{request\_id} on the entry] Every timeline event records the ID of
+  the HTTP request that created it. When something looks wrong six months later,
+  that string leads to the precise server log line. Very few systems do this,
+  and it costs one column.
+\end{description}
+
+\section{Append-only, enforced three times}
+
+Chapter~\ref{ch:arch} claimed the timeline cannot be edited. Here is the
+enforcement.
+
+\where{api/app/Models/IncidentEvent.php}
+\begin{lstlisting}[language=PHP]
+/**
+ * Corrections are appended as new events, never applied in place.
+ */
+protected static function booted(): void
+{
+    static::updating(static function (): never {
+        throw new LogicException('Incident timeline events are append-only and cannot be modified.');
+    });
+
+    static::deleting(static function (): never {
+        throw new LogicException('Incident timeline events are append-only and cannot be deleted.');
+    });
+}
+\end{lstlisting}
+
+\fpath{booted()} runs once when the class is first used, and registers two
+listeners. Any attempt to save a change to an existing event, or to delete one,
+throws --- from anywhere in the codebase, including a future controller written
+by someone who never read this book.
+
+\note{The return type \fpath{: never} is doing real work. It tells PHP --- and
+any static analyser --- that this function cannot return normally; it always
+throws. A reader skimming the file learns the guarantee from the signature
+without reading the body.}
+
+\subsection{Why three layers and not one}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{3.0cm}>{\raggedright\arraybackslash}p{4.4cm}p{6.4cm}@{}}
+\toprule
+\textbf{Layer} & \textbf{What it stops} & \textbf{What it cannot stop} \\
+\midrule
+API & Requests that ask to edit history --- there is no such endpoint. & Code inside the application calling the model directly. \\
+Model & Any PHP code in this project, deliberate or accidental. & Someone connecting to PostgreSQL and running \fpath{UPDATE}. \\
+Schema & Structure: there is no ``edited\_at'', no soft-delete column, nowhere for a revision to live. & A determined administrator with database credentials. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\warnbox{No layer is complete on its own, and the last row is honest: a person
+with direct database access can change anything. The guarantee is not
+mathematical --- it is that no \emph{ordinary} path through the system can
+rewrite history, and that doing so requires deliberate, logged, out-of-band
+action rather than a stray line of application code.}
+
+\section{Changing an incident}
+
+The controls beside the timeline are gated by permission, the same way the
+``Report incident'' button was in Chapter~\ref{ch:incidents}. But status changes
+carry a second gate the list page did not have: even a user \emph{with}
+permission may only make a \emph{legal} move.
+
+Recall the transition table from Chapter~\ref{ch:arch}: an incident that is
+\fpath{open} may become \fpath{acknowledged} or \fpath{resolved} --- and nothing
+else. The frontend shows only those two options. The API independently checks
+the same rule and returns \fpath{409 Conflict} for anything else.
+
+\note{Two independent checks of one rule sounds redundant, and it is --- on
+purpose. They fail differently. The frontend check fails \emph{invisibly}: the
+option is not offered, so the mistake is never made. The API check fails
+\emph{loudly}: a 409 with a message. One is for people, the other is for
+programs, and only the second is a security control.}
+
+\section{The page updates while you watch it}
+
+Open this incident in two browsers, change the status in one, and the other
+updates within a second --- no refresh.
+
+That is the \fpath{realtime} container. The chain, end to end:
+
+\begin{enumerate}[leftmargin=1.5cm]
+\item The API commits the change to PostgreSQL.
+\item After the commit, it publishes a small event to Redis.
+\item \fpath{realtime} is subscribed to Redis and receives it.
+\item It writes the event down every open connection belonging to that
+  organisation.
+\item Each browser receives it and updates the page in place.
+\end{enumerate}
+
+\warnbox{Step 4 says ``belonging to that organisation'' and that phrase is
+load-bearing. Every connection is authenticated, and events are filtered by
+organisation before being written. Without that filter, a live stream is a
+spectacular data leak: every customer would receive every other customer's
+incidents in real time, and no page in the UI would ever reveal it.}
+
+\subsection{Why the browser cannot just use its normal token}
+
+The realtime connection is opened by the browser's \fpath{EventSource}, which
+cannot set an \fpath{Authorization} header. So the frontend first asks the API
+for a short-lived \emph{ticket}, then opens the stream with that ticket in the
+query string.
+
+\note{A ticket is used rather than the access token because query strings are
+not private: they appear in server logs, proxy logs and browser history. A
+ticket is valid for seconds, for one connection, and grants nothing but the
+right to listen. Leaking it in a log is uninteresting; leaking your access token
+there is not.}
+
+\section{Check your understanding}
+
+\begin{itemize}[leftmargin=1.4cm]
+\cbox Name the three layers that stop the timeline being edited, and what each
+  one misses.
+\cbox Why is the same transition rule checked in both the browser and the API?
+\cbox Why does a timeline entry store a \fpath{request\_id}?
+\cbox Why does the live stream use a ticket instead of the access token?
+\end{itemize}

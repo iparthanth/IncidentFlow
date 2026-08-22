@@ -1,0 +1,162 @@
+\chapter{Permissions, seen rather than described}
+\label{ch:roles}
+
+Permission systems are usually taught as a grid, and the grid is forgettable.
+This chapter teaches it differently: the same page, photographed three times,
+signed in as three different people.
+
+\section{One page, three people}
+
+\shot{11-incidents-as-viewer.png}{\textbf{Sofia Rossi --- viewer.} She can read
+everything and change nothing. No ``Report incident''. No ``Export CSV''.}
+
+\shot{05-incidents-list.png}{\textbf{Daniel Okoye --- incident commander.} The
+same data, plus the ability to act on it.}
+
+\shot{12-incidents-as-admin.png}{\textbf{Riya Sharma --- administrator.} As the
+commander, plus organisation-level control and an ``Admin'' item in the
+navigation.}
+
+Nothing about the data changed between those three pictures. What changed is
+what is \emph{offered}.
+
+\section{Where the difference is defined}
+
+Exactly one file, and it is short enough to read in full.
+
+\where{api/app/Enums/OrganizationRole.php}
+\begin{lstlisting}[language=PHP]
+public function permissions(): array
+{
+    $viewer = [
+        Permission::IncidentView,
+        Permission::PostmortemView,
+        Permission::ServiceView,
+        Permission::MemberView,
+        Permission::MetricsView,
+    ];
+
+    $reporter = [
+        ...$viewer,
+        Permission::IncidentCreate,
+        Permission::CommentCreate,
+    ];
+
+    $responder = [
+        ...$reporter,
+        Permission::IncidentUpdate,
+        Permission::IncidentTransition,
+        Permission::UpdateCreate,
+    ];
+
+    $commander = [
+        ...$responder,
+        Permission::IncidentAssign,
+        Permission::IncidentCommand,
+        Permission::CommentModerate,
+        Permission::PostmortemManage,
+        Permission::PostmortemPublish,
+        Permission::ExportRun,
+    ];
+
+    return match ($this) {
+        self::Viewer            => $viewer,
+        self::Reporter          => $reporter,
+        self::Responder         => $responder,
+        self::IncidentCommander => $commander,
+        self::Administrator     => [
+            ...$commander,
+            Permission::IncidentDelete,
+            Permission::ServiceManage,
+            Permission::MemberManage,
+            Permission::AuditView,
+            Permission::OrganizationManage,
+        ],
+    };
+}
+\end{lstlisting}
+
+\subsection{Read the shape, not just the contents}
+
+The \fpath{...} is PHP's spread operator: \fpath{...\$viewer} means ``everything
+a viewer can do, and then these as well''. Each role is literally written as the
+previous one plus a few additions.
+
+\note{This makes the hierarchy \emph{structural} rather than a convention
+somebody has to maintain. It is impossible to give a reporter a permission a
+viewer lacks by accident, because a reporter's list is built from the viewer's.
+A flat table --- five arrays written out in full --- would allow that mistake,
+and would allow the five lists to drift apart over years of small edits.}
+
+\subsection{Permissions are an enum, not strings}
+
+\fpath{Permission::IncidentCreate}, not \fpath{'incident.create'}. Typing
+\fpath{Permission::IncidentCreat} is an error your editor catches before you
+save; typing \fpath{'incident.creat'} is a permission check that silently returns
+false forever --- and a silently-false permission check fails \emph{open} or
+\emph{closed} depending on which side of the comparison it lands, neither of
+which you will notice in testing.
+
+\section{Now the same picture from the other side}
+
+The screenshots showed the frontend. Here is what actually enforces it:
+
+\where{api/app/Enums/OrganizationRole.php}
+\begin{lstlisting}[language=PHP]
+public function has(Permission $permission): bool
+{
+    return in_array($permission, $this->permissions(), strict: true);
+}
+\end{lstlisting}
+
+\fpath{strict: true} compares type as well as value. Without it PHP's loose
+comparison can produce surprising equalities, and a permission check is the last
+place you want a surprise.
+
+\warnbox{Say this to yourself until it is automatic: \textbf{the missing button
+is not the security}. A viewer who opens the browser console and sends the
+request by hand meets this check on the server, and is refused with 403. If you
+ever find yourself relying on a hidden control to prevent something, you have
+not prevented it.}
+
+\section{The full grid, for reference}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{5.2cm}ccccc@{}}
+\toprule
+\textbf{Can\ldots} & \rotatebox{60}{viewer} & \rotatebox{60}{reporter} & \rotatebox{60}{responder} & \rotatebox{60}{commander} & \rotatebox{60}{admin} \\
+\midrule
+view incidents, services, metrics & yes & yes & yes & yes & yes \\
+create an incident & --- & yes & yes & yes & yes \\
+comment & --- & yes & yes & yes & yes \\
+change status & --- & --- & yes & yes & yes \\
+post an update & --- & --- & yes & yes & yes \\
+assign people & --- & --- & --- & yes & yes \\
+change severity & --- & --- & --- & yes & yes \\
+publish a postmortem & --- & --- & --- & yes & yes \\
+export CSV & --- & --- & --- & yes & yes \\
+manage services & --- & --- & --- & --- & yes \\
+manage members & --- & --- & --- & --- & yes \\
+read the audit log & --- & --- & --- & --- & yes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Try it yourself}
+
+With the stack running, sign in as each of these in turn. The password for every
+demo account is \fpath{incidentflow}.
+
+\begin{itemize}[leftmargin=1.4cm]
+\cbox \fpath{viewer@incidentflow.test} --- confirm ``Report incident'' is absent.
+\cbox \fpath{reporter@incidentflow.test} --- it appears. Open an incident and
+  confirm you cannot change its status.
+\cbox \fpath{responder@incidentflow.test} --- now you can.
+\cbox \fpath{commander@incidentflow.test} --- assignment and severity appear.
+\cbox \fpath{admin@incidentflow.test} --- an ``Admin'' item appears in the
+  navigation.
+\end{itemize}
+
+\expect{Five sign-ins, five visibly different versions of the same application.
+If two of them look identical, you are still signed in as the previous user ---
+sign out properly between them.}
