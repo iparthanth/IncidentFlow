@@ -12,6 +12,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -110,7 +111,21 @@ final class HandleIdempotency
     private function claim(string $key, string $endpoint, string $hash, ?int $userId, ?int $organizationId): ?IdempotencyKey
     {
         try {
-            return IdempotencyKey::query()->create([
+            // Wrapped in a transaction so the insert runs inside a SAVEPOINT
+            // whenever there is already an open transaction.
+            //
+            // This is not defensive tidiness — it is required for correctness on
+            // PostgreSQL. A statement that errors inside a transaction puts the
+            // whole transaction into an aborted state (SQLSTATE 25P02), and
+            // every subsequent statement is refused until it is rolled back. The
+            // unique violation below is *expected* here, so without a savepoint
+            // to roll back to, the very next query — the SELECT in
+            // handleExisting() that finds the original response — fails, and a
+            // duplicate submission returns 500 instead of replaying the original.
+            //
+            // SQLite has no such rule, which is exactly why this survived the
+            // local suite and only surfaced on the PostgreSQL CI run.
+            return DB::transaction(fn (): IdempotencyKey => IdempotencyKey::query()->create([
                 'organization_id' => $organizationId,
                 'user_id' => $userId,
                 'key' => $key,
@@ -118,7 +133,7 @@ final class HandleIdempotency
                 'request_hash' => $hash,
                 'status' => IdempotencyKey::STATUS_IN_PROGRESS,
                 'expires_at' => now()->addHours(24),
-            ]);
+            ]));
         } catch (QueryException) {
             // Unique violation is the expected, load-bearing outcome here —
             // it means a concurrent or earlier attempt already claimed the key.

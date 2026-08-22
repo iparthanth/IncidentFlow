@@ -10,7 +10,9 @@ use App\Models\IdempotencyKey;
 use App\Models\Incident;
 use App\Models\IncidentEvent;
 use App\Models\User;
+use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -38,6 +40,59 @@ final class IdempotencyTest extends TestCase
 
         $this->assertApiError($response, 400, 'idempotency.key_required');
         $this->assertSame(0, Incident::query()->count());
+    }
+
+    public function test_the_duplicate_claim_is_isolated_in_a_savepoint(): void
+    {
+        // Regression test for a PostgreSQL-only failure that SQLite cannot show.
+        //
+        // Claiming a key is an INSERT that is *expected* to fail on the unique
+        // index when the key is a replay. On PostgreSQL a failed statement
+        // aborts the entire surrounding transaction (SQLSTATE 25P02), so the
+        // SELECT that follows — the one that finds the original response — was
+        // refused, and a duplicate submission returned 500 instead of replaying.
+        //
+        // The fix is to run the insert inside a SAVEPOINT so only the failed
+        // statement is rolled back. Asserting on the mechanism rather than on
+        // the status code is deliberate: the status code passes on SQLite
+        // whether or not the fix is present, so it would prove nothing here.
+        [$organization, $user] = $this->tenantWithMember(OrganizationRole::Reporter);
+        $key = (string) Str::uuid();
+
+        $payload = [
+            'title' => 'Payments are failing at checkout',
+            'severity' => IncidentSeverity::Sev1->value,
+        ];
+
+        $this->actingAsMember($user, $organization)
+            ->withHeader('Idempotency-Key', $key)
+            ->postJson('/api/v1/incidents', $payload)
+            ->assertCreated();
+
+        // Counting transaction *events* rather than logged SQL: a statement that
+        // throws never fires QueryExecuted, and savepoints are issued straight
+        // through PDO, so DB::listen cannot see either of the things that matter.
+        $begins = 0;
+        Event::listen(TransactionBeginning::class, static function () use (&$begins): void {
+            $begins++;
+        });
+
+        $this->actingAsMember($user, $organization)
+            ->withHeader('Idempotency-Key', $key)
+            ->postJson('/api/v1/incidents', $payload)
+            ->assertCreated();
+
+        // On a replay the controller never runs — the middleware short-circuits
+        // to the stored response — so the only transaction opened during this
+        // request is the one wrapping the claim attempt. Without it the count is
+        // zero, which makes this a genuine discriminator on SQLite too.
+        $this->assertSame(
+            1,
+            $begins,
+            'The duplicate claim must open a transaction (a SAVEPOINT when nested), '
+            .'or the failed insert aborts the surrounding transaction on PostgreSQL '
+            .'and the replay lookup is refused with SQLSTATE 25P02.',
+        );
     }
 
     public function test_replaying_the_same_key_returns_the_original_response_without_creating_a_second_incident(): void
