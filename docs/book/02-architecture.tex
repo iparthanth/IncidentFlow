@@ -1,0 +1,163 @@
+\chapter{The architecture}
+\label{ch:arch}
+
+\section{Nine programs, not one}
+
+When you run IncidentFlow, nine separate programs start. That number surprises
+people. A student project is usually one program; this is nine, and every one of
+them earns its place.
+
+Here is the whole system on one page. Read the arrows as ``talks to''.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize\sffamily,
+  box/.style={draw=rule,fill=white,rounded corners=3pt,minimum height=9mm,minimum width=24mm,align=center},
+  edge/.style={draw=rule,fill=brandlt,rounded corners=3pt,minimum height=9mm,minimum width=24mm,align=center},
+  data/.style={draw=rule,fill=goodbg,rounded corners=3pt,minimum height=9mm,minimum width=24mm,align=center},
+  work/.style={draw=rule,fill=warnbg,rounded corners=3pt,minimum height=9mm,minimum width=24mm,align=center},
+  arr/.style={-{Stealth[length=2mm]},draw=muted,thick},
+  evt/.style={-{Stealth[length=2mm]},draw=muted,thick,dashed},
+]
+\node[box] (browser) {Your browser};
+\node[edge, below=9mm of browser] (nginx) {\textbf{nginx}\\port 8080};
+\node[box, below left=11mm and 6mm of nginx] (web) {\textbf{web}\\React files};
+\node[box, below=11mm of nginx] (api) {\textbf{api}\\Laravel + PHP-FPM};
+\node[box, below right=11mm and 6mm of nginx] (rt) {\textbf{realtime}\\Node, SSE/WS};
+
+\node[data, below=11mm of api] (pg) {\textbf{postgres}\\the truth};
+\node[data, left=8mm of pg] (redis) {\textbf{redis}\\queue + events};
+\node[work, right=8mm of pg] (horizon) {\textbf{horizon}\\job worker};
+\node[work, below=7mm of redis] (sched) {\textbf{scheduler}\\timed tasks};
+\node[box, below=7mm of horizon] (mail) {\textbf{mailpit}\\fake inbox};
+
+\draw[arr] (browser) -- (nginx);
+\draw[arr] (nginx) -- (web);
+\draw[arr] (nginx) -- (api);
+\draw[arr] (nginx) -- (rt);
+\draw[arr] (api) -- (pg);
+\draw[arr] (api) -- (redis);
+\draw[evt] (redis) -- (rt);
+\draw[arr] (horizon) -- (redis);
+\draw[arr] (horizon) -- (pg);
+\draw[arr] (sched) -- (redis);
+\draw[arr] (horizon) -- (mail);
+\end{tikzpicture}
+\caption*{\small\color{muted}The nine containers. Solid arrows are direct
+connections; the dashed arrow is events flowing from Laravel to the realtime
+tier through Redis. Only nginx is reachable from outside.}
+\end{figure}
+
+\section{What each one is for}
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{2.4cm}>{\raggedright\arraybackslash}p{2.5cm}>{\raggedright\arraybackslash}p{9.0cm}@{}}
+\toprule
+\textbf{Container} & \textbf{Built from} & \textbf{Its job} \\
+\midrule
+\fpath{nginx} & nginx 1.27 & The front door. Everything from your browser arrives here and is routed onward. Nothing else is exposed. \\
+\fpath{web} & React + Vite & Serves the compiled JavaScript and CSS. It has no logic --- it asks the API for everything. \\
+\fpath{api} & PHP 8.3 + Laravel & All the rules. Who may do what, what a valid transition is, what gets written. \\
+\fpath{realtime} & Node.js 22 & Holds long-lived connections open so screens update without a refresh. \\
+\fpath{postgres} & PostgreSQL 16 & Stores everything. The single source of truth. \\
+\fpath{redis} & Redis 7 & Two jobs: carries live events from Laravel to realtime, and holds the queue of pending work. \\
+\fpath{horizon} & same as api & Runs queued jobs --- chiefly sending email --- so the web request does not wait for them. \\
+\fpath{scheduler} & same as api & Runs timed tasks, like sweeping notifications that were never delivered. \\
+\fpath{mailpit} & mailpit & A fake inbox for development, so test email never reaches a real person. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{Notice that \fpath{api}, \fpath{horizon} and \fpath{scheduler} are built
+from \emph{the same image}. One Dockerfile, three containers, three different
+start commands. Without Docker you would install PHP once and run three
+processes; here each gets its own isolated process, so a memory leak in the
+queue worker cannot take the API down with it.}
+
+\section{Following one request all the way through}
+
+Abstract diagrams are easy to nod at and hard to remember. So follow one real
+action: \textbf{a responder clicks ``Acknowledge'' on an incident.}
+
+\begin{enumerate}[leftmargin=1.5cm]
+\item The browser sends \fpath{POST /api/v1/incidents/42/status} to
+  \fpath{localhost:8080}. That is \textbf{nginx}.
+\item nginx sees the path starts with \fpath{/api/}, so it hands the request to
+  \textbf{api} over FastCGI --- not HTTP. (FastCGI is the protocol web servers
+  use to talk to PHP.)
+\item Laravel checks the JWT in the \fpath{Authorization} header: who is this?
+\item It checks the \emph{policy}: may a responder change this incident's
+  status?
+\item It checks the \emph{enum}: is \fpath{open} to \fpath{acknowledged} a legal
+  move?
+\item Inside one database transaction it writes the new status to
+  \textbf{postgres}, appends a timeline event, and creates notification rows.
+\item The transaction commits. Only then does it push jobs onto \textbf{redis}
+  and publish an event.
+\item \textbf{horizon} picks the job off Redis and sends email through
+  \textbf{mailpit}.
+\item \textbf{realtime} is subscribed to Redis. It receives the event and pushes
+  it down every open connection.
+\item Every other open browser updates. Nobody pressed refresh.
+\end{enumerate}
+
+\warnbox{Step 7 says ``the transaction commits, \emph{only then}'' for a
+reason. If the job were queued before the commit, Horizon --- a separate process
+--- could pick it up and look for an incident that has not been written yet. It
+would find nothing and fail. This is one of the classic distributed-system bugs,
+and the ordering in that step is the entire defence against it.}
+
+\section{Why not one program?}
+
+You could build all of this as a single Laravel application. Many people would.
+Three things here genuinely cannot be done that way.
+
+\begin{description}[leftmargin=1.2cm,style=nextline]
+\item[Long-lived connections] PHP-FPM assigns a worker process per request. A
+  connection held open for an hour would occupy a worker for an hour. Twenty
+  users watching a dashboard would consume the whole pool and the API would stop
+  answering anything at all. Node handles thousands of idle connections on one
+  process, because that is what an event loop is good at. Hence a separate
+  \fpath{realtime} service.
+\item[Slow work] Sending an email takes as long as the mail server takes. If
+  that happened inside the request, the responder's browser would spin while
+  SMTP negotiated. So the API writes a row, returns immediately, and
+  \fpath{horizon} does the sending afterwards.
+\item[Timed work] Something must run every minute regardless of whether anyone
+  is using the system. A web request cannot do that, because there might not be
+  one. Hence \fpath{scheduler}.
+\end{description}
+
+\note{This is a \emph{modular service-oriented} architecture, not microservices.
+The distinction matters: there is one database and one deployable unit. The
+services are split along the lines where the \emph{runtime model} differs ---
+request/response, long-lived connection, background work --- not along business
+domains. Splitting by domain is what produces microservices, and with them
+distributed transactions, which this system deliberately does not have.}
+
+\section{The security boundary}
+
+One rule, and it explains most of the configuration you will read later:
+\textbf{only nginx is reachable from outside}.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Service} & \textbf{Reachable from your machine?} & \textbf{How} \\
+\midrule
+nginx & yes & \fpath{localhost:8080} \\
+mailpit & yes (development only) & \fpath{localhost:8025} \\
+postgres & development only & \fpath{localhost:5432} \\
+redis & development only & \fpath{localhost:6379} \\
+api & no & only nginx, over the internal network \\
+realtime & no & only nginx \\
+web & no & only nginx \\
+horizon & no & has no network port at all \\
+scheduler & no & has no network port at all \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+In production those ``development only'' rows are closed too. You will see
+exactly how in Part~III, in \fpath{docker-compose.prod.yml}.

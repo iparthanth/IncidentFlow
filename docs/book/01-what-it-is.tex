@@ -1,0 +1,145 @@
+\part{Understanding the system}
+
+\chapter{What IncidentFlow actually is}
+
+\section{The problem}
+
+When something breaks in production --- a payment service starts failing, a
+database runs out of disk --- several things must happen at once. Someone has to
+be told. Someone has to take charge. Everyone else needs to see what is being
+done without interrupting the person doing it. And afterwards, someone has to be
+able to reconstruct exactly what happened and when.
+
+That last part is the hard one. Chat threads get edited. Memories disagree. The
+engineer who fixed it at 3am writes the summary a week later.
+
+\note{IncidentFlow's single organising idea is that \textbf{the timeline is
+append-only}. Nothing written can be edited or deleted --- not by an
+administrator, not by the person who wrote it, not by the API. If the record
+says the incident was acknowledged at 02:14, that is what happened. Almost every
+design decision in this book follows from that one commitment.}
+
+\section{Who uses it}
+
+Five roles, deliberately few. Each can do strictly more than the one above it.
+
+\begin{center}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{4.2cm}>{\raggedright\arraybackslash}p{10.0cm}@{}}
+\toprule
+\textbf{Role} & \textbf{What it is for} \\
+\midrule
+\fpath{viewer} & Can read everything, change nothing. Support staff, managers, anyone who needs to know without being involved. \\
+\fpath{reporter} & Can raise an incident, and comment. Cannot drive one. \\
+\fpath{responder} & Works incidents: acknowledges, mitigates, resolves. \\
+\fpath{incident_commander} & Owns an incident. Assigns people, changes severity, closes it out. \\
+\fpath{administrator} & Manages the organisation: members, services, and the audit log. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+You will meet this table again in Chapter~\ref{ch:roles}, where the same list
+appears as \emph{screenshots of one page seen by different people}. That is the
+clearest way to understand a permission system: not as a table, but as buttons
+that are missing.
+
+\section{The shape of an incident}
+
+Every incident has a \textbf{severity} --- how bad it is --- and a
+\textbf{status} --- where it is in its life.
+
+\subsection{Severity: how bad is it}
+
+\begin{center}
+\begin{tabular}{@{}llp{9.2cm}@{}}
+\toprule
+\textbf{Value} & \textbf{Name} & \textbf{Meaning} \\
+\midrule
+\fpath{sev1} & Critical & Everything is down, or money is being lost right now. Wakes people up. \\
+\fpath{sev2} & High & A major feature is broken for many users. \\
+\fpath{sev3} & Moderate & Degraded, or broken for a few. \\
+\fpath{sev4} & Low & Cosmetic or minor; fix it in normal hours. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\note{Severity is not decoration. \fpath{sev1} and \fpath{sev2} send email to
+every responder in the organisation; \fpath{sev3} and \fpath{sev4} do not. One
+enum value decides whether a hundred phones buzz at 3am --- which is why
+changing severity is a permission a reporter does not have.}
+
+\subsection{Status: where is it in its life}
+
+\begin{center}
+\begin{tabular}{@{}llp{9.0cm}@{}}
+\toprule
+\textbf{Value} & \textbf{Name} & \textbf{Meaning} \\
+\midrule
+\fpath{open} & Open & Reported. Nobody has picked it up yet. \\
+\fpath{acknowledged} & Acknowledged & Someone is actively working on it. \\
+\fpath{mitigated} & Mitigated & Users are no longer affected, but the underlying cause is still there. \\
+\fpath{resolved} & Resolved & Actually fixed. \\
+\fpath{closed} & Closed & Reviewed and finished. Terminal. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The transitions are a rule, not a suggestion}
+
+You cannot move an incident from any status to any other. The permitted moves
+are written down in exactly one place, and the API refuses everything else.
+
+\where{api/app/Enums/IncidentStatus.php}
+\begin{lstlisting}[language=PHP]
+public function allowedTransitions(): array
+{
+    return match ($this) {
+        // A trivial incident can go straight to resolved without ceremony.
+        self::Open         => [self::Acknowledged, self::Resolved],
+        self::Acknowledged => [self::Mitigated, self::Resolved],
+        // Mitigation that does not hold sends the incident back to active work.
+        self::Mitigated    => [self::Resolved, self::Acknowledged],
+        // Resolved is reversible: an incident that recurs was never resolved.
+        self::Resolved     => [self::Closed, self::Acknowledged],
+        // Closed is terminal. Post-closure findings belong in the postmortem.
+        self::Closed       => [],
+    };
+}
+\end{lstlisting}
+
+Read that carefully, because three of those five lines encode a real opinion
+about how incidents work.
+
+\begin{itemize}[leftmargin=1.4cm]
+\item \textbf{Open can jump straight to Resolved.} Forcing every trivial
+  incident through an acknowledgement step produces a system people work around.
+\item \textbf{Mitigated can go \emph{back} to Acknowledged.} A workaround that
+  stops holding is not progress, and the timeline should say so.
+\item \textbf{Closed goes nowhere.} Once closed, the record is finished.
+  Anything learned later belongs in the postmortem, which is a separate
+  document --- not a quiet edit to history.
+\end{itemize}
+
+\warnbox{This rule lives in the \emph{enum}, not in the controller and not in
+the React app. The frontend also hides buttons for moves that are not allowed
+--- but that is a courtesy to the user, not a security control. Anyone can send
+any HTTP request they like. If the rule lived only in the browser, it would not
+be a rule at all. You will see this pattern throughout: \textbf{the UI prevents
+mistakes, the API prevents abuse}, and only one of them is trusted.}
+
+\section{Your first look}
+
+Here is the sign-in screen --- the whole system's front door.
+
+\shot{01-login-empty.png}{The sign-in screen at \fpath{http://localhost:8080}.
+Chapter~\ref{ch:login} takes this page apart line by line.}
+
+And here is what a signed-in incident commander sees: everything currently
+happening.
+
+\shot{05-incidents-list.png}{The incidents list, signed in as Daniel Okoye
+(incident commander). Seventeen incidents, seeded so the system has a realistic
+history to show.}
+
+Do not worry about details yet --- Part~II gives each screen a full chapter. For
+now notice only this: every coloured badge on that page is one of the enum
+values from the tables above. The pictures and the code are the same thing.

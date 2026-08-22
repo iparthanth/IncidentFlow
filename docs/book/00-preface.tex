@@ -1,0 +1,63 @@
+\chapter*{How to read this book}
+\addcontentsline{toc}{chapter}{How to read this book}
+\markboth{How to read this book}{}
+
+This book has one goal: that you could rebuild IncidentFlow \emph{by hand},
+without help, having read it.
+
+That is a higher bar than ``understand the code''. It means you need to know
+not only what each file contains, but why it exists, what would break without
+it, which command creates it, and in what order the pieces have to be built.
+
+\section*{What is in here}
+
+\begin{description}[leftmargin=2.2cm,style=nextline]
+\item[Part I] \textbf{Understanding.} What the system does, the shape of it,
+  and where every file lives. Read this once, slowly. Nothing later makes sense
+  without it.
+\item[Part II] \textbf{The guided tour.} Every screen, as a picture, next to the
+  code that produces it and the file path it lives at. This is the bulk of the
+  book.
+\item[Part III] \textbf{Running it.} Every command, every connection, every
+  port. Written for someone who has only ever opened a folder in VS Code.
+\item[Part IV] \textbf{Building it from nothing.} The order in which the pieces
+  have to be created, and why that order is forced.
+\item[Part V] \textbf{Bugs.} Real failures from building this system --- the
+  symptom, the wrong guess, the evidence, the fix. This is the part that
+  teaches judgement.
+\end{description}
+
+\section*{How the pages are laid out}
+
+Three things repeat throughout, and recognising them will make the book faster
+to read.
+
+\where{api/app/Models/Incident.php}
+\begin{lstlisting}[language=PHP]
+// A grey bar like the one above always precedes code, and always
+// names the exact file the code came from, relative to the project root.
+\end{lstlisting}
+
+\note{A blue box explains \emph{why} something is the way it is. The code shows
+what happens; these boxes explain the decision behind it.}
+
+\warnbox{An amber box is a mistake that is easy to make and unpleasant to
+diagnose. Read these even if you skim everything else.}
+
+\expect{A green box tells you what you should observe on your own machine if you
+followed along correctly. If you see something different, stop --- do not
+continue until it matches.}
+
+\bugbox{A red box is a real failure that happened while building this system.
+Part V covers them in full, but they appear inline where the relevant code is
+introduced, so you meet the bug in the place it lives.}
+
+\section*{The one rule}
+
+Type the commands. Do not copy and paste them, and do not read past a green box
+whose result you have not seen on your own screen.
+
+The difference between reading about a system and being able to build one is
+almost entirely made up of the small failures you hit while typing --- a wrong
+directory, a missing container, a typo in a hostname. Skipping them feels
+faster and teaches nothing.
